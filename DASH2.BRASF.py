@@ -1,10 +1,11 @@
+# streamlit_app_brasforma_v17.py
+# Brasforma – Dashboard Comercial v17
+# - Mantém TODAS as abas anteriores (v16)
+# - Upgrade: nova aba "SEBASTIAN" (desempenho individual do representante)
+#   * KPIs individuais (faturamento, pedidos abertos, clientes ativos/novos/perdidos)
+#   * Históricos dos últimos 12 meses (pedidos, faturamento, família, cliente)
+#   * Pedidos em aberto detalhados por representante
 
-# streamlit_app_brasforma_v16.py
-# Brasforma – Dashboard Comercial v16
-# - Mantém TODAS as abas operantes (v15)
-# - Upgrade no Simulador de Vendas (multi-SKU):
-#   * mantém preço manual, elasticidade, impostos, despesas variáveis, alvo de MC e export em CSV
-#   * adiciona export da simulação em PDF (resumo executivo + tabela dos SKUs)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,7 +13,7 @@ import altair as alt
 from pathlib import Path
 from fpdf import FPDF  # para geração de PDF
 
-st.set_page_config(page_title="Brasforma – Dashboard Comercial v16", layout="wide")
+st.set_page_config(page_title="Brasforma – Dashboard Comercial v17", layout="wide")
 
 # ---------------- Utils ----------------
 def to_num(x):
@@ -58,21 +59,14 @@ def display_table(df, money_cols=None, pct_cols=None, int_cols=None, max_rows=50
 def build_simulation_pdf(sim_df, faturamento_sim, margem_contrib, margem_contrib_pct,
                          icms_pct, pis_pct, cofins_pct, outros_pct,
                          frete_pct, comissao_pct, margem_target_pct):
-    \"\"\"Gera um PDF executivo da simulação:
-    - cabeçalho com KPIs consolidados
-    - parâmetros globais (impostos, frete, comissão, MC alvo)
-    - tabela compacta por SKU
-    \"\"\"
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
 
-    # Título
     pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 10, "Simulação de Vendas - Brasforma", ln=True)
     pdf.ln(2)
 
-    # KPIs consolidados
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 6, f"Faturamento simulado (total): {fmt_money(faturamento_sim)}", ln=True)
     pdf.cell(0, 6, f"Margem de Contribuição (R$): {fmt_money(margem_contrib)}", ln=True)
@@ -81,7 +75,6 @@ def build_simulation_pdf(sim_df, faturamento_sim, margem_contrib, margem_contrib
     pdf.cell(0, 6, f"Margem de Contribuição (%): {mc_pct_txt} | MC alvo: {mc_alvo_txt}", ln=True)
     pdf.ln(3)
 
-    # Parâmetros globais
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, "Parâmetros globais da simulação:", ln=True)
     pdf.set_font("Helvetica", "", 9)
@@ -89,7 +82,6 @@ def build_simulation_pdf(sim_df, faturamento_sim, margem_contrib, margem_contrib
     pdf.cell(0, 5, f"Frete: {fmt_pct_safe(frete_pct,1)} | Comissão: {fmt_pct_safe(comissao_pct,1)}", ln=True)
     pdf.ln(3)
 
-    # Tabela de SKUs
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, "Resumo por SKU:", ln=True)
     pdf.ln(1)
@@ -161,7 +153,6 @@ def load_data(path: str, sheet_name="Carteira de Vendas"):
     if "Atrasado / No prazo" in df.columns:
         df["AtrasadoFlag"] = df["Atrasado / No prazo"].astype(str).str.contains("Atras", case=False, na=False)
 
-    # Coluna de quantidade (para custo médio)
     qty_candidates = ["Qtde","QTDE","Quantidade","Quantidade Pedido","Qtd","QTD","Quant.","Quant","Qde","QTD.","QTD PEDIDA","QTD PEDIDO","QTD SOLICITADA","QTD Solicitada"]
     qty_col = None
     for c in qty_candidates:
@@ -170,11 +161,10 @@ def load_data(path: str, sheet_name="Carteira de Vendas"):
             break
     if qty_col is None:
         try:
-            qty_col = df.columns[12]  # fallback para coluna M
+            qty_col = df.columns[12]
         except Exception:
             qty_col = None
 
-    # Custo total = custo unitário * quantidade
     if "Custo" in df.columns:
         if qty_col is not None:
             df[qty_col] = df[qty_col].apply(to_num)
@@ -184,7 +174,6 @@ def load_data(path: str, sheet_name="Carteira de Vendas"):
     else:
         df["Custo Total"] = np.nan
 
-    # Lucro / margem
     if "Valor Pedido R$" in df.columns:
         df["Lucro Bruto"] = df["Valor Pedido R$"] - df["Custo Total"]
         df["Margem %"] = np.where(df["Valor Pedido R$"]>0, 100*df["Lucro Bruto"]/df["Valor Pedido R$"], np.nan)
@@ -193,6 +182,73 @@ def load_data(path: str, sheet_name="Carteira de Vendas"):
         df["PedidoItemKey"] = df["Pedido"].astype(str) + "||" + df["ITEM"].astype(str)
 
     return df, qty_col
+
+# ---- Estimativa de elasticidade histórica por SKU ----
+@st.cache_data(show_spinner=False)
+def estimate_elasticities(df_source: pd.DataFrame, qty_col: str):
+    if qty_col is None:
+        return pd.DataFrame(columns=["SKU","Elasticidade","N_Obs","R2"])
+
+    df2 = df_source.copy()
+    if "ITEM" not in df2.columns or "Valor Pedido R$" not in df2.columns:
+        return pd.DataFrame(columns=["SKU","Elasticidade","N_Obs","R2"])
+
+    if "Ano-Mes" not in df2.columns:
+        if "Data / Mês" in df2.columns:
+            df2["Ano-Mes"] = pd.to_datetime(df2["Data / Mês"], errors="coerce").dt.to_period("M").astype(str)
+        else:
+            return pd.DataFrame(columns=["SKU","Elasticidade","N_Obs","R2"])
+
+    df2[qty_col] = df2[qty_col].apply(to_num)
+
+    mask = (
+        df2[qty_col].notna() & (df2[qty_col] > 0) &
+        df2["Valor Pedido R$"].notna() & (df2["Valor Pedido R$"] > 0) &
+        df2["ITEM"].notna() & df2["Ano-Mes"].notna()
+    )
+    df2 = df2[mask].copy()
+    if df2.empty:
+        return pd.DataFrame(columns=["SKU","Elasticidade","N_Obs","R2"])
+
+    df2["PrecoUnit"] = df2["Valor Pedido R$"] / df2[qty_col]
+
+    grp = df2.groupby(["ITEM","Ano-Mes"], as_index=False).agg(
+        PrecoMed=("PrecoUnit","mean"),
+        Qtd=(qty_col,"sum"),
+    )
+
+    results = []
+    for sku, g in grp.groupby("ITEM"):
+        g = g[(g["PrecoMed"] > 0) & (g["Qtd"] > 0)]
+        if len(g) < 3 or g["PrecoMed"].nunique() < 2 or g["Qtd"].nunique() < 2:
+            continue
+
+        log_p = np.log(g["PrecoMed"].values)
+        log_q = np.log(g["Qtd"].values)
+        try:
+            beta = np.polyfit(log_p, log_q, 1)
+            slope = float(beta[0])
+            pred = np.polyval(beta, log_p)
+            ss_res = float(np.sum((log_q - pred)**2))
+            ss_tot = float(np.sum((log_q - log_q.mean())**2))
+            r2 = 1 - ss_res/ss_tot if ss_tot > 0 else np.nan
+        except Exception:
+            continue
+
+        if not np.isfinite(slope):
+            continue
+
+        e = slope
+        if e > 0:
+            e = -0.3
+        if e < -5:
+            e = -5.0
+
+        results.append({"SKU": sku, "Elasticidade": e, "N_Obs": len(g), "R2": r2})
+
+    if not results:
+        return pd.DataFrame(columns=["SKU","Elasticidade","N_Obs","R2"])
+    return pd.DataFrame(results).sort_values("Elasticidade")
 
 DEFAULT_DATA = "Dashboard - Comite Semanal - Brasforma IA (1).xlsx"
 ALT_DATA = "Dashboard - Comite Semanal - Brasforma (1).xlsx"
@@ -256,10 +312,12 @@ def calc_kpis(_df):
 fat, n_ped, n_cli, n_sku, ticket, lucro, margem_w, pct_rentavel = calc_kpis(flt)
 
 tabs = st.tabs([
-    "Visão Executiva","Clientes – RFM","Rentabilidade","Clientes","Produtos","Representantes","Geografia","Operacional","Pareto/ABC","Simulador de Vendas","Exportar"
+    "Visão Executiva","Clientes – RFM","Rentabilidade","Clientes","Produtos",
+    "Representantes","Geografia","Operacional","Pareto/ABC","SEBASTIAN",
+    "Simulador de Vendas","Exportar"
 ])
 (tab_exec, tab_rfm, tab_profit, tab_cli, tab_sku,
- tab_rep, tab_geo, tab_ops, tab_pareto, tab_sim, tab_export) = tabs
+ tab_rep, tab_geo, tab_ops, tab_pareto, tab_seb, tab_sim, tab_export) = tabs
 
 # ---------------- Visão Executiva ----------------
 with tab_exec:
@@ -539,7 +597,240 @@ with tab_pareto:
             s["Classe"] = s["%Acum"].apply(lambda p: "A" if p<=80 else ("B" if p<=95 else "C"))
             display_table(s.head(300), money_cols=["Valor Pedido R$"], pct_cols=["%Acum"])
 
-# ---------------- Simulador de Vendas – com export CSV + PDF ----------------
+# ---------------- SEBASTIAN – cockpit do representante ----------------
+with tab_seb:
+    st.subheader("SEBASTIAN – Desempenho Individual do Representante")
+
+    if "Representante" not in df.columns or "Valor Pedido R$" not in df.columns:
+        st.warning("A aba SEBASTIAN exige pelo menos as colunas 'Representante' e 'Valor Pedido R$'.")
+    else:
+        reps_all = sorted(df["Representante"].dropna().unique())
+        if not reps_all:
+            st.info("Nenhum representante encontrado na base.")
+        else:
+            rep_sel = st.selectbox("Selecione o representante / vendedor / gerente", reps_all)
+
+            # Definir coluna de data para análise (pedido > mês)
+            if "Data do Pedido" in df.columns and df["Data do Pedido"].notna().any():
+                date_col = "Data do Pedido"
+            else:
+                date_col = "Data / Mês" if "Data / Mês" in df.columns else None
+
+            if date_col is None or d_ini is None:
+                st.warning("Para a visão SEBASTIAN funcionar, é necessário ter uma coluna de data (Data do Pedido ou Data / Mês) e o filtro de período configurado.")
+            else:
+                d_ini_ts = pd.to_datetime(d_ini)
+                d_fim_ts = pd.to_datetime(d_fim)
+
+                # Base do representante (toda a história dele)
+                df_rep_all = df[df["Representante"] == rep_sel].copy()
+                df_rep_all = df_rep_all[df_rep_all[date_col].notna()]
+
+                # Base do período (respeita o filtro de período)
+                df_rep_period = df_rep_all[
+                    (df_rep_all[date_col] >= d_ini_ts) &
+                    (df_rep_all[date_col] <= d_fim_ts)
+                ].copy()
+
+                # Flags de status – heurística para "faturado" e "aberto"
+                if "Status de Produção / Faturamento" in df_rep_period.columns:
+                    status_series = df_rep_period["Status de Produção / Faturamento"].astype(str)
+                    is_faturado = status_series.str.contains("fatur", case=False, na=False)
+                    is_aberto = status_series.str.contains("abert|pend|prod", case=False, na=False) & ~is_faturado
+                else:
+                    is_faturado = pd.Series([True]*len(df_rep_period), index=df_rep_period.index)
+                    is_aberto = pd.Series([False]*len(df_rep_period), index=df_rep_period.index)
+
+                # 1a / 1b / 1c / 1d / 1e
+                val_faturado = df_rep_period.loc[is_faturado, "Valor Pedido R$"].sum()
+                val_total_ped = df_rep_period["Valor Pedido R$"].sum()
+
+                if "Pedido" in df_rep_period.columns:
+                    qtd_ped_total = df_rep_period["Pedido"].nunique()
+                    qtd_ped_aberto = df_rep_period.loc[is_aberto, "Pedido"].nunique()
+                else:
+                    qtd_ped_total = len(df_rep_period)
+                    qtd_ped_aberto = len(df_rep_period[is_aberto])
+
+                val_ped_aberto = df_rep_period.loc[is_aberto, "Valor Pedido R$"].sum()
+
+                if "Nome Cliente" in df_rep_period.columns:
+                    clientes_faturados = df_rep_period.loc[is_faturado, "Nome Cliente"].nunique()
+                    clientes_pedidos = df_rep_period["Nome Cliente"].nunique()
+                else:
+                    clientes_faturados = np.nan
+                    clientes_pedidos = np.nan
+
+                # 1f / 1g / 1h – clientes ativos, novos, perdidos
+                if "Nome Cliente" in df_rep_all.columns:
+                    # Ativos no período = clientes com qualquer pedido no período
+                    clientes_ativos = clientes_pedidos
+
+                    # Primeiro e último pedido por cliente
+                    grp_dates = df_rep_all.groupby("Nome Cliente")[date_col]
+                    first_buy = grp_dates.min()
+                    last_buy = grp_dates.max()
+
+                    # Clientes novos = primeira compra no período
+                    novos_mask = (first_buy >= d_ini_ts) & (first_buy <= d_fim_ts)
+                    clientes_novos = first_buy[novos_mask].index.tolist()
+
+                    # Clientes perdidos = tinham compra nos 12 meses anteriores e sumiram no período
+                    janela_previa_ini = d_ini_ts - pd.DateOffset(months=12)
+                    prev_mask = (last_buy >= janela_previa_ini) & (last_buy < d_ini_ts)
+                    clientes_prev = set(last_buy[prev_mask].index)
+
+                    clientes_period = set(df_rep_period["Nome Cliente"].unique())
+                    clientes_perdidos = sorted(clientes_prev - clientes_period)
+
+                    n_clientes_novos = len(clientes_novos)
+                    n_clientes_perdidos = len(clientes_perdidos)
+                else:
+                    clientes_ativos = np.nan
+                    n_clientes_novos = np.nan
+                    n_clientes_perdidos = np.nan
+                    clientes_novos = []
+                    clientes_perdidos = []
+
+                # KPIs em painel
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("1a) Faturamento no período (faturado)", fmt_money(val_faturado))
+                c2.metric("1b) Valor total de pedidos no período", fmt_money(val_total_ped))
+                c3.metric("1c) Pedidos abertos (R$)", fmt_money(val_ped_aberto))
+                c4.metric("1c) Pedidos abertos (qtd)", fmt_int(qtd_ped_aberto))
+
+                c5, c6, c7, c8 = st.columns(4)
+                c5.metric("1d) Clientes com faturamento", fmt_int(clientes_faturados))
+                c6.metric("1e) Clientes com pedidos", fmt_int(clientes_pedidos))
+                c7.metric("1f) Clientes ativos no período", fmt_int(clientes_ativos))
+                c8.metric("1g) Clientes novos no período", fmt_int(n_clientes_novos))
+
+                c9, _, _, _ = st.columns(4)
+                c9.metric("1h) Clientes perdidos/inativados (últimos 12m)", fmt_int(n_clientes_perdidos))
+
+                # Listagens curtas de novos e perdidos
+                with st.expander("Clientes novos e clientes perdidos (lista resumida)"):
+                    col_n, col_p = st.columns(2)
+                    if clientes_novos:
+                        col_n.markdown("**Clientes novos no período**")
+                        col_n.write(", ".join(sorted(clientes_novos[:50])) + (" ..." if len(clientes_novos) > 50 else ""))
+                    else:
+                        col_n.caption("Sem clientes novos no período com esse representante.")
+
+                    if clientes_perdidos:
+                        col_p.markdown("**Clientes perdidos/inativos (tinham compra nos 12m anteriores e sumiram no período)**")
+                        col_p.write(", ".join(clientes_perdidos[:50]) + (" ..." if len(clientes_perdidos) > 50 else ""))
+                    else:
+                        col_p.caption("Sem clientes claramente perdidos na janela analisada.")
+
+                # ---------- 2 / 3 / 4 / 5 / 7 – histórico 12 meses ----------
+                st.markdown("---")
+                st.markdown("### Histórico dos últimos 12 meses")
+
+                janela_12_ini = d_fim_ts - pd.DateOffset(months=12)
+                df_rep_12m = df_rep_all[
+                    (df_rep_all[date_col] >= janela_12_ini) &
+                    (df_rep_all[date_col] <= d_fim_ts)
+                ].copy()
+
+                # Garantir coluna Ano-Mes
+                if "Ano-Mes" not in df_rep_12m.columns:
+                    df_rep_12m["Ano-Mes"] = df_rep_12m[date_col].dt.to_period("M").astype(str)
+
+                col_h1, col_h2 = st.columns(2)
+
+                # 2) Histórico de pedidos
+                with col_h1:
+                    if "Pedido" in df_rep_12m.columns:
+                        hist_ped = df_rep_12m.groupby("Ano-Mes", as_index=False)["Pedido"].nunique().rename(columns={"Pedido":"Qtde Pedidos"})
+                        st.caption("2) Histórico de pedidos (últimos 12 meses)")
+                        st.altair_chart(
+                            alt.Chart(hist_ped).mark_bar().encode(
+                                x=alt.X("Ano-Mes:N", title=None, sort=None),
+                                y=alt.Y("Qtde Pedidos:Q", title="Pedidos"),
+                                tooltip=["Ano-Mes","Qtde Pedidos"]
+                            ).properties(height=280),
+                            use_container_width=True
+                        )
+                    else:
+                        st.caption("2) Histórico de pedidos indisponível (coluna 'Pedido' ausente).")
+
+                # 3) Histórico de faturamento
+                with col_h2:
+                    if "Valor Pedido R$" in df_rep_12m.columns:
+                        hist_fat = df_rep_12m.groupby("Ano-Mes", as_index=False)["Valor Pedido R$"].sum()
+                        st.caption("3) Histórico de faturamento (últimos 12 meses)")
+                        st.altair_chart(
+                            alt.Chart(hist_fat).mark_line(point=True).encode(
+                                x=alt.X("Ano-Mes:N", title=None, sort=None),
+                                y=alt.Y("Valor Pedido R$:Q", title="Faturamento (R$)"),
+                                tooltip=["Ano-Mes", alt.Tooltip("Valor Pedido R$:Q", format=",.0f")]
+                            ).properties(height=280),
+                            use_container_width=True
+                        )
+                    else:
+                        st.caption("3) Histórico de faturamento indisponível (coluna 'Valor Pedido R$' ausente).")
+
+                # 4) Faturamento por família (últimos 12 meses)
+                st.markdown("### Faturamento por família de produtos – últimos 12 meses")
+
+                # Tentativa de achar coluna "família"
+                familia_cols = [c for c in df_rep_12m.columns if "fam" in c.lower()]
+                col_familia = familia_cols[0] if familia_cols else None
+
+                if col_familia and "Valor Pedido R$" in df_rep_12m.columns:
+                    fat_fam = df_rep_12m.groupby(col_familia, as_index=False)["Valor Pedido R$"].sum().sort_values("Valor Pedido R$", ascending=False)
+                    display_table(fat_fam, money_cols=["Valor Pedido R$"])
+                    st.altair_chart(
+                        alt.Chart(fat_fam.head(20)).mark_bar().encode(
+                            x=alt.X("Valor Pedido R$:Q", title="Faturamento (R$)"),
+                            y=alt.Y(f"{col_familia}:N", sort="-x", title="Família"),
+                            tooltip=[col_familia, alt.Tooltip("Valor Pedido R$:Q", format=",.0f")]
+                        ).properties(height=400),
+                        use_container_width=True
+                    )
+                else:
+                    st.info("Não encontrei coluna de família de produtos (ex.: 'Família', 'Familia Produto'). Ajustar a base se quiser essa análise.")
+
+                # 5 / 6) Faturamento por cliente – últimos 12 meses vs período atual
+                st.markdown("### Faturamento por cliente – comparação")
+
+                if "Nome Cliente" in df_rep_12m.columns and "Valor Pedido R$" in df_rep_12m.columns:
+                    fat_cli_12m = df_rep_12m.groupby("Nome Cliente", as_index=False)["Valor Pedido R$"].sum().rename(columns={"Valor Pedido R$":"Fat 12m"})
+                else:
+                    fat_cli_12m = pd.DataFrame(columns=["Nome Cliente","Fat 12m"])
+
+                if "Nome Cliente" in df_rep_period.columns and "Valor Pedido R$" in df_rep_period.columns:
+                    fat_cli_periodo = df_rep_period.groupby("Nome Cliente", as_index=False)["Valor Pedido R$"].sum().rename(columns={"Valor Pedido R$":"Fat Período"})
+                else:
+                    fat_cli_periodo = pd.DataFrame(columns=["Nome Cliente","Fat Período"])
+
+                fat_cli_merge = pd.merge(fat_cli_12m, fat_cli_periodo, on="Nome Cliente", how="outer").fillna(0)
+                fat_cli_merge["Δ Período vs 12m (R$)"] = fat_cli_merge["Fat Período"] - fat_cli_merge["Fat 12m"]/12.0  # comparando período com média mensal dos 12m
+
+                display_table(
+                    fat_cli_merge.sort_values("Fat Período", ascending=False).head(50),
+                    money_cols=["Fat 12m","Fat Período","Δ Período vs 12m (R$)"]
+                )
+
+                # 7) Pedidos em aberto – visão detalhada
+                st.markdown("### 7) Pedidos em aberto do representante no período selecionado")
+
+                if is_aberto.any():
+                    df_aberto = df_rep_period[is_aberto].copy()
+                    if "Pedido" in df_aberto.columns:
+                        resumo_aberto = df_aberto.groupby("Pedido", as_index=False).agg({
+                            "Valor Pedido R$":"sum",
+                            "Nome Cliente": "first",
+                            date_col: "max"
+                        }).rename(columns={"Valor Pedido R$":"Valor Pedido","Nome Cliente":"Cliente","Pedido":"Nº Pedido",date_col:"Data Última Atualização"})
+                        display_table(resumo_aberto.sort_values("Valor Pedido", ascending=False), money_cols=["Valor Pedido"])
+                    else:
+                        display_table(df_aberto, money_cols=["Valor Pedido R$"])
+                else:
+                    st.caption("Nenhum pedido em aberto para esse representante no período selecionado (considerando a heurística de status).")
+
+# ---------------- Simulador de Vendas – (mantido) ----------------
 with tab_sim:
     st.subheader("Simulador de Vendas – multi-SKU com preço manual, elasticidade, impostos, despesas variáveis, alvo de MC e export (CSV/PDF)")
 
@@ -626,7 +917,6 @@ with tab_sim:
                     preco_unit_sim_hist = preco_unit_base * (1 + ajuste_preco/100.0)
                     custo_unit_sim = custo_unit_base * (1 + ajuste_custo/100.0)
 
-                    # Campo de preço manual
                     preco_unit_manual = st.number_input(
                         "Preço unitário da simulação (R$) – se 0, usa preço histórico ajustado",
                         min_value=0.0,
@@ -686,7 +976,6 @@ with tab_sim:
                 with col_m:
                     margem_target_pct = st.number_input("MC mínima desejada (%)", min_value=0.0, max_value=80.0, value=15.0, step=0.5)
 
-                # Consolidação dos SKUs
                 faturamento_sim = sim_df["Faturamento Simulado"].sum()
                 custo_total_sim = sim_df["Custo Total Simulado"].sum()
                 lucro_bruto_sim = faturamento_sim - custo_total_sim
@@ -706,12 +995,11 @@ with tab_sim:
                 margem_contrib = receita_liq - custo_total_sim - desp_var_total
                 margem_contrib_pct = 100*margem_contrib/receita_liq if receita_liq>0 else np.nan
 
-                # Engenharia de margem: preço mínimo por SKU para atingir MC alvo
                 T_imp = (icms_pct + pis_pct + cofins_pct + outros_pct) / 100.0
                 T_d   = (frete_pct + comissao_pct) / 100.0
                 M     = margem_target_pct / 100.0
 
-                A = (1 - M) * (1 - T_imp) - T_d  # denominador da fórmula do preço mínimo
+                A = (1 - M) * (1 - T_imp) - T_d
 
                 if faturamento_sim > 0 and A <= 0:
                     st.warning(
@@ -783,7 +1071,7 @@ with tab_sim:
                         -imposto_outros,
                         -frete_val,
                         -comissao_val,
-                        receita_liq - desp_var_total,  # RL após despesas variáveis
+                        receita_liq - desp_var_total,
                         -custo_total_sim,
                         margem_contrib,
                         margem_contrib_pct
@@ -799,7 +1087,6 @@ with tab_sim:
 
                 st.table(dre_view)
 
-                # --------- Análise de elasticidade preço × volume ---------
                 st.markdown("---")
                 st.markdown("### Análise de elasticidade preço × volume (cenários)")
 
@@ -811,7 +1098,7 @@ with tab_sim:
                 with col_e3:
                     var_max = st.number_input("Variação máxima de preço (%)", min_value=0.0, max_value=50.0, value=10.0, step=1.0)
 
-                elast_df = None  # para possível uso em governança futuramente
+                elast_df = None
 
                 if ativar_elast:
                     if var_max <= var_min:
@@ -821,10 +1108,32 @@ with tab_sim:
                         with col_e4:
                             n_cenarios = st.slider("Quantidade de cenários", min_value=5, max_value=21, value=9, step=2)
                         with col_e5:
-                            elasticidade = st.number_input(
-                                "Elasticidade de volume (tipicamente negativa, ex: -1.5)",
+                            elasticidade_manual = st.number_input(
+                                "Elasticidade de volume padrão (tipicamente negativa, ex: -1.5)",
                                 min_value=-5.0, max_value=1.0, value=-1.5, step=0.1
                             )
+
+                        elastic_all = estimate_elasticities(df, qty_col) if qty_col is not None else None
+                        elast_map = {}
+                        modo_elast = "Usar valor manual único"
+
+                        if elastic_all is not None and not elastic_all.empty:
+                            sub_elast = elastic_all[elastic_all["SKU"].isin(skus_sel)].copy()
+                            if len(sub_elast) > 0:
+                                st.markdown("#### Elasticidade histórica estimada por SKU (base real)")
+                                display_table(
+                                    sub_elast.rename(columns={
+                                        "Elasticidade": "Elasticidade Estimada",
+                                        "N_Obs": "N Observações"
+                                    }),
+                                    int_cols=["N Observações"]
+                                )
+                                modo_elast = st.radio(
+                                    "Como aplicar elasticidade nos cenários?",
+                                    ["Usar valor manual único", "Usar elasticidade histórica por SKU (fallback para valor manual)"],
+                                    index=1,
+                                )
+                                elast_map = dict(zip(sub_elast["SKU"], sub_elast["Elasticidade"]))
 
                         deltas = np.linspace(var_min, var_max, n_cenarios)
                         rows_elast = []
@@ -832,12 +1141,23 @@ with tab_sim:
                         base_qtd = sim_df["Qtd Simulada"].astype(float)
                         base_preco = sim_df["Preço Unitário Simulado"].astype(float)
                         base_custo_unit = sim_df["Custo Unitário Simulado"].astype(float)
+                        base_skus = sim_df["SKU"].astype(str).tolist()
 
                         for d in deltas:
                             fator_preco = 1 + d/100.0
-                            fator_volume = max(1 + elasticidade * (d/100.0), 0.0)  # evita volume negativo
 
-                            qtd_cenario = base_qtd * fator_volume
+                            if modo_elast.startswith("Usar elasticidade histórica") and elast_map:
+                                fatores_volume = []
+                                for sku in base_skus:
+                                    e_sku = elast_map.get(sku, elasticidade_manual)
+                                    fv = max(1 + e_sku * (d/100.0), 0.0)
+                                    fatores_volume.append(fv)
+                                fatores_volume = np.array(fatores_volume)
+                                qtd_cenario = base_qtd.values * fatores_volume
+                            else:
+                                fator_volume = max(1 + elasticidade_manual * (d/100.0), 0.0)
+                                qtd_cenario = base_qtd * fator_volume
+
                             preco_cenario = base_preco * fator_preco
 
                             fat_cenario = (qtd_cenario * preco_cenario).sum()
@@ -893,14 +1213,13 @@ with tab_sim:
 
                         st.caption(
                             "A elasticidade define como o **volume reage à variação de preço**. "
-                            "Ex.: elasticidade -1,5 significa que uma redução de 10% no preço tende a aumentar o volume em ~15%."
+                            "No modo histórico, cada SKU usa sua curva real sempre que há dados suficientes; "
+                            "quando não há, caímos no valor manual padrão."
                         )
 
-                # ---------------- Export da simulação ----------------
                 st.markdown("---")
                 st.markdown("### Exportar simulação de vendas")
 
-                # CSV
                 export_df = sim_df.copy()
                 export_df["ICMS (%)"] = icms_pct
                 export_df["PIS (%)"] = pis_pct
@@ -925,7 +1244,6 @@ with tab_sim:
                         mime="text/csv"
                     )
 
-                # PDF
                 with col_exp2:
                     try:
                         pdf_bytes = build_simulation_pdf(
@@ -947,22 +1265,8 @@ with tab_sim:
                             file_name="simulacao_venda_brasforma.pdf",
                             mime="application/pdf"
                         )
-                    except Exception as e:
+                    except Exception:
                         st.warning("Falha ao gerar PDF. Verifique se o pacote 'fpdf2' está instalado no ambiente.")
-
-                st.caption(
-                    "Os exports trazem o resumo por SKU (quantidade, preço, custo, faturamento, margem), "
-                    "mais os parâmetros globais de impostos, frete, comissão, MC alvo e MC consolidada. "
-                    "O PDF vem em formato executivo para comitê / aprovação."
-                )
-
-                st.markdown("#### Leitura executiva")
-                st.write(
-                    "- Para cada SKU, você informa o **preço unitário da simulação**; se deixar 0, usamos o preço histórico ajustado.\n"
-                    "- Impostos, fretes, comissões e MC alvo continuam governando **preço mínimo e desconto máximo permitido** por SKU.\n"
-                    "- A análise de **elasticidade preço × volume** testa cenários de aumento/redução de preço e impacto em volume, faturamento e MC.\n"
-                    "- Os botões de **export (CSV/PDF)** levam o cenário direto para Excel, proposta formal ou pauta de comitê."
-                )
 
 # ---------------- Export ----------------
 with tab_export:
@@ -971,7 +1275,6 @@ with tab_export:
     with st.expander("Prévia dos dados filtrados"):
         st.dataframe(flt)
 
-# Rodapé de governança de cálculo
 if qty_col:
     st.caption(f"✓ Custo calculado como **unitário × quantidade**. Coluna de quantidade detectada: **{qty_col}**.")
 else:
