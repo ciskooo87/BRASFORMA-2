@@ -1,10 +1,7 @@
-# streamlit_app_brasforma_v17.py
-# Brasforma – Dashboard Comercial v17
-# - Mantém TODAS as abas anteriores (v16)
-# - Upgrade: nova aba "SEBASTIAN" (desempenho individual do representante)
-#   * KPIs individuais (faturamento, pedidos abertos, clientes ativos/novos/perdidos)
-#   * Históricos dos últimos 12 meses (pedidos, faturamento, família, cliente)
-#   * Pedidos em aberto detalhados por representante
+# streamlit_app_brasforma_v18.py
+# Brasforma – Dashboard Comercial v18
+# - Mantém TODAS as abas anteriores (v17)
+# - Upgrade: na aba SEBASTIAN, faturamento por família usa explicitamente a COLUNA I (Observação) da planilha
 
 import streamlit as st
 import pandas as pd
@@ -13,7 +10,7 @@ import altair as alt
 from pathlib import Path
 from fpdf import FPDF  # para geração de PDF
 
-st.set_page_config(page_title="Brasforma – Dashboard Comercial v17", layout="wide")
+st.set_page_config(page_title="Brasforma – Dashboard Comercial v18", layout="wide")
 
 # ---------------- Utils ----------------
 def to_num(x):
@@ -610,7 +607,6 @@ with tab_seb:
         else:
             rep_sel = st.selectbox("Selecione o representante / vendedor / gerente", reps_all)
 
-            # Definir coluna de data para análise (pedido > mês)
             if "Data do Pedido" in df.columns and df["Data do Pedido"].notna().any():
                 date_col = "Data do Pedido"
             else:
@@ -622,17 +618,14 @@ with tab_seb:
                 d_ini_ts = pd.to_datetime(d_ini)
                 d_fim_ts = pd.to_datetime(d_fim)
 
-                # Base do representante (toda a história dele)
                 df_rep_all = df[df["Representante"] == rep_sel].copy()
                 df_rep_all = df_rep_all[df_rep_all[date_col].notna()]
 
-                # Base do período (respeita o filtro de período)
                 df_rep_period = df_rep_all[
                     (df_rep_all[date_col] >= d_ini_ts) &
                     (df_rep_all[date_col] <= d_fim_ts)
                 ].copy()
 
-                # Flags de status – heurística para "faturado" e "aberto"
                 if "Status de Produção / Faturamento" in df_rep_period.columns:
                     status_series = df_rep_period["Status de Produção / Faturamento"].astype(str)
                     is_faturado = status_series.str.contains("fatur", case=False, na=False)
@@ -641,7 +634,6 @@ with tab_seb:
                     is_faturado = pd.Series([True]*len(df_rep_period), index=df_rep_period.index)
                     is_aberto = pd.Series([False]*len(df_rep_period), index=df_rep_period.index)
 
-                # 1a / 1b / 1c / 1d / 1e
                 val_faturado = df_rep_period.loc[is_faturado, "Valor Pedido R$"].sum()
                 val_total_ped = df_rep_period["Valor Pedido R$"].sum()
 
@@ -661,21 +653,16 @@ with tab_seb:
                     clientes_faturados = np.nan
                     clientes_pedidos = np.nan
 
-                # 1f / 1g / 1h – clientes ativos, novos, perdidos
                 if "Nome Cliente" in df_rep_all.columns:
-                    # Ativos no período = clientes com qualquer pedido no período
                     clientes_ativos = clientes_pedidos
 
-                    # Primeiro e último pedido por cliente
                     grp_dates = df_rep_all.groupby("Nome Cliente")[date_col]
                     first_buy = grp_dates.min()
                     last_buy = grp_dates.max()
 
-                    # Clientes novos = primeira compra no período
                     novos_mask = (first_buy >= d_ini_ts) & (first_buy <= d_fim_ts)
                     clientes_novos = first_buy[novos_mask].index.tolist()
 
-                    # Clientes perdidos = tinham compra nos 12 meses anteriores e sumiram no período
                     janela_previa_ini = d_ini_ts - pd.DateOffset(months=12)
                     prev_mask = (last_buy >= janela_previa_ini) & (last_buy < d_ini_ts)
                     clientes_prev = set(last_buy[prev_mask].index)
@@ -692,7 +679,6 @@ with tab_seb:
                     clientes_novos = []
                     clientes_perdidos = []
 
-                # KPIs em painel
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("1a) Faturamento no período (faturado)", fmt_money(val_faturado))
                 c2.metric("1b) Valor total de pedidos no período", fmt_money(val_total_ped))
@@ -708,7 +694,6 @@ with tab_seb:
                 c9, _, _, _ = st.columns(4)
                 c9.metric("1h) Clientes perdidos/inativados (últimos 12m)", fmt_int(n_clientes_perdidos))
 
-                # Listagens curtas de novos e perdidos
                 with st.expander("Clientes novos e clientes perdidos (lista resumida)"):
                     col_n, col_p = st.columns(2)
                     if clientes_novos:
@@ -723,7 +708,6 @@ with tab_seb:
                     else:
                         col_p.caption("Sem clientes claramente perdidos na janela analisada.")
 
-                # ---------- 2 / 3 / 4 / 5 / 7 – histórico 12 meses ----------
                 st.markdown("---")
                 st.markdown("### Histórico dos últimos 12 meses")
 
@@ -733,13 +717,11 @@ with tab_seb:
                     (df_rep_all[date_col] <= d_fim_ts)
                 ].copy()
 
-                # Garantir coluna Ano-Mes
                 if "Ano-Mes" not in df_rep_12m.columns:
                     df_rep_12m["Ano-Mes"] = df_rep_12m[date_col].dt.to_period("M").astype(str)
 
                 col_h1, col_h2 = st.columns(2)
 
-                # 2) Histórico de pedidos
                 with col_h1:
                     if "Pedido" in df_rep_12m.columns:
                         hist_ped = df_rep_12m.groupby("Ano-Mes", as_index=False)["Pedido"].nunique().rename(columns={"Pedido":"Qtde Pedidos"})
@@ -755,7 +737,6 @@ with tab_seb:
                     else:
                         st.caption("2) Histórico de pedidos indisponível (coluna 'Pedido' ausente).")
 
-                # 3) Histórico de faturamento
                 with col_h2:
                     if "Valor Pedido R$" in df_rep_12m.columns:
                         hist_fat = df_rep_12m.groupby("Ano-Mes", as_index=False)["Valor Pedido R$"].sum()
@@ -771,28 +752,35 @@ with tab_seb:
                     else:
                         st.caption("3) Histórico de faturamento indisponível (coluna 'Valor Pedido R$' ausente).")
 
-                # 4) Faturamento por família (últimos 12 meses)
                 st.markdown("### Faturamento por família de produtos – últimos 12 meses")
 
-                # Tentativa de achar coluna "família"
-                familia_cols = [c for c in df_rep_12m.columns if "fam" in c.lower()]
-                col_familia = familia_cols[0] if familia_cols else None
+                col_familia = None
+                try:
+                    col_familia_global = df.columns[8]  # coluna I da planilha original
+                    if col_familia_global in df_rep_12m.columns:
+                        col_familia = col_familia_global
+                except Exception:
+                    col_familia = None
 
                 if col_familia and "Valor Pedido R$" in df_rep_12m.columns:
-                    fat_fam = df_rep_12m.groupby(col_familia, as_index=False)["Valor Pedido R$"].sum().sort_values("Valor Pedido R$", ascending=False)
+                    fat_fam = (
+                        df_rep_12m
+                        .groupby(col_familia, as_index=False)["Valor Pedido R$"]
+                        .sum()
+                        .sort_values("Valor Pedido R$", ascending=False)
+                    )
                     display_table(fat_fam, money_cols=["Valor Pedido R$"])
                     st.altair_chart(
                         alt.Chart(fat_fam.head(20)).mark_bar().encode(
                             x=alt.X("Valor Pedido R$:Q", title="Faturamento (R$)"),
-                            y=alt.Y(f"{col_familia}:N", sort="-x", title="Família"),
+                            y=alt.Y(f"{col_familia}:N", sort="-x", title="Família (coluna I – Observação)"),
                             tooltip=[col_familia, alt.Tooltip("Valor Pedido R$:Q", format=",.0f")]
                         ).properties(height=400),
                         use_container_width=True
                     )
                 else:
-                    st.info("Não encontrei coluna de família de produtos (ex.: 'Família', 'Familia Produto'). Ajustar a base se quiser essa análise.")
+                    st.info("Coluna I (Observação) não foi encontrada na base para uso como família.")
 
-                # 5 / 6) Faturamento por cliente – últimos 12 meses vs período atual
                 st.markdown("### Faturamento por cliente – comparação")
 
                 if "Nome Cliente" in df_rep_12m.columns and "Valor Pedido R$" in df_rep_12m.columns:
@@ -806,14 +794,13 @@ with tab_seb:
                     fat_cli_periodo = pd.DataFrame(columns=["Nome Cliente","Fat Período"])
 
                 fat_cli_merge = pd.merge(fat_cli_12m, fat_cli_periodo, on="Nome Cliente", how="outer").fillna(0)
-                fat_cli_merge["Δ Período vs 12m (R$)"] = fat_cli_merge["Fat Período"] - fat_cli_merge["Fat 12m"]/12.0  # comparando período com média mensal dos 12m
+                fat_cli_merge["Δ Período vs 12m (R$)"] = fat_cli_merge["Fat Período"] - fat_cli_merge["Fat 12m"]/12.0
 
                 display_table(
                     fat_cli_merge.sort_values("Fat Período", ascending=False).head(50),
                     money_cols=["Fat 12m","Fat Período","Δ Período vs 12m (R$)"]
                 )
 
-                # 7) Pedidos em aberto – visão detalhada
                 st.markdown("### 7) Pedidos em aberto do representante no período selecionado")
 
                 if is_aberto.any():
