@@ -254,38 +254,56 @@ def estimate_elasticities(df_source: pd.DataFrame, qty_col: str):
 @st.cache_data(show_spinner=False)
 def load_goals(path="Metas_Brasforma.xlsx", sheet_name="Metas"):
     """
-    Espera um arquivo Metas_Brasforma.xlsx com aba Metas e colunas:
-    Ano | Mes | Representante | Meta_Faturamento
+    Espera um arquivo Metas_Brasforma.xlsx com uma aba de metas.
+    Procura a aba 'Metas' de forma case-insensitive (Metas, metas, METAS, etc).
+    Colunas obrigatórias: Ano | Mes | Representante | Meta_Faturamento
     """
     p = Path(path)
     if not p.exists():
         return None
+
     try:
-        metas = pd.read_excel(p, sheet_name=sheet_name)
+        # abre o arquivo e descobre o nome real da aba, ignorando maiúsculas/minúsculas
+        xls = pd.ExcelFile(p)
+        target_sheet = None
+        for sn in xls.sheet_names:
+            if sn.strip().lower() == sheet_name.lower():
+                target_sheet = sn
+                break
+
+        # se não achar nenhuma aba equivalente a "Metas", devolve None
+        if target_sheet is None:
+            return None
+
+        metas = pd.read_excel(xls, sheet_name=target_sheet)
     except Exception:
         return None
 
     metas.columns = [c.strip() for c in metas.columns]
+
+    # garantir que a coluna de meta tenha o nome padrão
     if "Meta_Faturamento" not in metas.columns:
         for c in metas.columns:
             if "meta" in c.lower() and ("fat" in c.lower() or "fatur" in c.lower()):
                 metas = metas.rename(columns={c: "Meta_Faturamento"})
                 break
 
-    required = {"Ano","Mes","Representante","Meta_Faturamento"}
+    required = {"Ano", "Mes", "Representante", "Meta_Faturamento"}
     if not required.issubset(metas.columns):
         return None
 
     metas["Ano"] = pd.to_numeric(metas["Ano"], errors="coerce").astype("Int64")
     metas["Mes"] = pd.to_numeric(metas["Mes"], errors="coerce").astype("Int64")
     metas["Meta_Faturamento"] = pd.to_numeric(metas["Meta_Faturamento"], errors="coerce")
-    metas = metas.dropna(subset=["Ano","Mes","Representante","Meta_Faturamento"])
+    metas = metas.dropna(subset=["Ano", "Mes", "Representante", "Meta_Faturamento"])
 
     metas["Representante"] = metas["Representante"].astype(str).str.strip()
+
     if "Meta_Margem_Bruta" in metas.columns:
         metas["Meta_Margem_Bruta"] = pd.to_numeric(metas["Meta_Margem_Bruta"], errors="coerce")
 
     return metas
+
 
 # ---------------- Fonte de dados ----------------
 DEFAULT_DATA = "Dashboard - Comite Semanal - Brasforma IA (1).xlsx"
