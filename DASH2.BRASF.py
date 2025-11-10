@@ -398,7 +398,7 @@ with tab_dir:
             "Esperado: aba 'Metas' com colunas Ano, Mes, Representante, Meta_Faturamento."
         )
     else:
-        # Coluna de data para forecast
+        # coluna de data para forecast
         if "Data do Pedido" in df.columns and df["Data do Pedido"].notna().any():
             date_col_fore = "Data do Pedido"
         elif "Data / Mês" in df.columns:
@@ -409,6 +409,7 @@ with tab_dir:
         if date_col_fore is None:
             st.warning("Não foi encontrada coluna de data para cálculo de forecast.")
         else:
+            # mês de referência: fim do filtro
             if d_fim is not None:
                 ref_date = pd.to_datetime(d_fim)
             else:
@@ -425,7 +426,7 @@ with tab_dir:
                     "Cadastre metas para liberar essa visão."
                 )
             else:
-                # Fatos do mês até a data de referência (full base, ignorando filtros de rep/UF)
+                # Fatos do mês até a data de referência (base toda, ignorando filtros laterais)
                 df_month = df[df[date_col_fore].dt.to_period("M") == pd.Period(ref_date, "M")].copy()
                 df_month = df_month[df_month[date_col_fore] <= ref_date]
 
@@ -435,6 +436,7 @@ with tab_dir:
                     dias_mes = pd.Period(ref_date, "M").days_in_month
                     dias_passados = ref_date.day
 
+                    # realizado e forecast total da empresa
                     fat_real_total = df_month["Valor Pedido R$"].sum()
                     fat_fore_total = fat_real_total / dias_passados * dias_mes if dias_passados > 0 else np.nan
                     meta_total = metas_ref["Meta_Faturamento"].sum()
@@ -453,77 +455,220 @@ with tab_dir:
                     else:
                         c4.metric("Atingimento projetado", "-")
 
-                    # Painel por representante
+                    # ---------------- NOVO: seletor de nível de análise ----------------
+                    st.markdown("### Metas por hierarquia comercial")
+                    nivel = st.radio(
+                        "Nível de análise",
+                        ["Regional", "Representante"],
+                        index=0,
+                        horizontal=True,
+                    )
+
+                    # mapa Representante -> Regional (usando base historica)
+                    if {"Representante", "Regional"}.issubset(df.columns):
+                        map_rep_reg = (
+                            df[["Representante", "Regional"]]
+                            .dropna(subset=["Representante"])
+                            .drop_duplicates(subset=["Representante"])
+                        )
+                    else:
+                        map_rep_reg = pd.DataFrame(columns=["Representante", "Regional"])
+
+                    # realizado por representante no mês
                     if "Representante" in df_month.columns:
-                        real_rep = df_month.groupby("Representante", as_index=False)["Valor Pedido R$"].sum() \
-                                           .rename(columns={"Valor Pedido R$": "Realizado"})
+                        real_rep = (
+                            df_month.groupby("Representante", as_index=False)["Valor Pedido R$"]
+                            .sum()
+                            .rename(columns={"Valor Pedido R$": "Realizado"})
+                        )
                     else:
                         real_rep = pd.DataFrame(columns=["Representante", "Realizado"])
-                    real_rep["Realizado"] = pd.to_numeric(real_rep["Realizado"], errors="coerce").fillna(0.0)
-                    real_rep["Forecast"] = real_rep["Realizado"] / dias_passados * dias_mes if dias_passados > 0 else np.nan
 
-                    metas_ref_rep = metas_ref.groupby("Representante", as_index=False)["Meta_Faturamento"].sum()
+                    real_rep["Realizado"] = pd.to_numeric(real_rep["Realizado"], errors="coerce").fillna(0.0)
+                    # forecast por representante = realizado até a data * fator de projeção
+                    if dias_passados > 0:
+                        real_rep["Forecast"] = real_rep["Realizado"] / dias_passados * dias_mes
+                    else:
+                        real_rep["Forecast"] = real_rep["Realizado"]
+
+                    metas_ref_rep = (
+                        metas_ref.groupby("Representante", as_index=False)["Meta_Faturamento"]
+                        .sum()
+                    )
                     metas_ref_rep["Representante"] = metas_ref_rep["Representante"].astype(str).str.strip()
 
-                    painel_rep = metas_ref_rep.merge(real_rep, on="Representante", how="left")
+                    # painel base por representante (independente da visualização escolhida)
+                    painel_rep = real_rep.merge(metas_ref_rep, on="Representante", how="outer")
                     painel_rep["Realizado"] = painel_rep["Realizado"].fillna(0.0)
                     painel_rep["Forecast"] = painel_rep["Forecast"].fillna(painel_rep["Realizado"])
+                    painel_rep["Meta_Faturamento"] = painel_rep["Meta_Faturamento"].fillna(0.0)
 
                     painel_rep["Atingimento Atual (%)"] = np.where(
                         painel_rep["Meta_Faturamento"] > 0,
                         100 * painel_rep["Realizado"] / painel_rep["Meta_Faturamento"],
-                        np.nan
+                        np.nan,
                     )
                     painel_rep["Atingimento Forecast (%)"] = np.where(
                         painel_rep["Meta_Faturamento"] > 0,
                         100 * painel_rep["Forecast"] / painel_rep["Meta_Faturamento"],
-                        np.nan
+                        np.nan,
                     )
                     painel_rep["GAP (R$)"] = painel_rep["Meta_Faturamento"] - painel_rep["Forecast"]
 
-                    st.markdown("#### Metas por representante – mês de referência")
-                    display_table(
-                        painel_rep.sort_values("Meta_Faturamento", ascending=False),
-                        money_cols=["Meta_Faturamento", "Realizado", "Forecast", "GAP (R$)"],
-                        pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"]
-                    )
+                    # anexa regional quando existir
+                    if not map_rep_reg.empty:
+                        painel_rep = painel_rep.merge(map_rep_reg, on="Representante", how="left")
+                    else:
+                        painel_rep["Regional"] = "SEM REGIONAL"
 
-                    # Gráfico meta x realizado x forecast
-                    try:
-                        chart_df = painel_rep.copy()
-                        chart_long = chart_df.melt(
-                            id_vars=["Representante"],
-                            value_vars=["Meta_Faturamento", "Forecast", "Realizado"],
-                            var_name="Tipo",
-                            value_name="Valor"
+                    # ---------------- Visão por REGIONAL ----------------
+                    if nivel == "Regional":
+                        painel_reg = (
+                            painel_rep.groupby("Regional", as_index=False)
+                            .agg({
+                                "Meta_Faturamento": "sum",
+                                "Realizado": "sum",
+                                "Forecast": "sum",
+                            })
                         )
-                        st.altair_chart(
-                            alt.Chart(chart_long).mark_bar().encode(
-                                x=alt.X("Valor:Q", title="R$"),
-                                y=alt.Y("Representante:N", sort="-x"),
-                                color=alt.Color("Tipo:N", title=None),
-                                tooltip=["Representante", "Tipo", alt.Tooltip("Valor:Q", format=",.0f")]
-                            ).properties(height=420),
-                            use_container_width=True
+                        painel_reg["Atingimento Atual (%)"] = np.where(
+                            painel_reg["Meta_Faturamento"] > 0,
+                            100 * painel_reg["Realizado"] / painel_reg["Meta_Faturamento"],
+                            np.nan,
                         )
-                    except Exception:
-                        pass
+                        painel_reg["Atingimento Forecast (%)"] = np.where(
+                            painel_reg["Meta_Faturamento"] > 0,
+                            100 * painel_reg["Forecast"] / painel_reg["Meta_Faturamento"],
+                            np.nan,
+                        )
+                        painel_reg["GAP (R$)"] = painel_reg["Meta_Faturamento"] - painel_reg["Forecast"]
 
-                    # Necessidade diária por representante
+                        st.markdown("#### Metas por **regional** – mês de referência")
+                        display_table(
+                            painel_reg.sort_values("Meta_Faturamento", ascending=False),
+                            money_cols=["Meta_Faturamento", "Realizado", "Forecast", "GAP (R$)"],
+                            pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"],
+                        )
+
+                        # gráfico por regional
+                        try:
+                            chart_df = painel_reg.copy()
+                            chart_long = chart_df.melt(
+                                id_vars=["Regional"],
+                                value_vars=["Meta_Faturamento", "Forecast", "Realizado"],
+                                var_name="Tipo",
+                                value_name="Valor",
+                            )
+                            st.altair_chart(
+                                alt.Chart(chart_long).mark_bar().encode(
+                                    x=alt.X("Valor:Q", title="R$"),
+                                    y=alt.Y("Regional:N", sort="-x"),
+                                    color=alt.Color("Tipo:N", title=None),
+                                    tooltip=["Regional", "Tipo", alt.Tooltip("Valor:Q", format=",.0f")],
+                                ).properties(height=420),
+                                use_container_width=True,
+                            )
+                        except Exception:
+                            pass
+
+                        # detalhamento opcional: ranking de representantes dentro de uma regional escolhida
+                        regionais = sorted(painel_reg["Regional"].dropna().unique())
+                        if regionais:
+                            reg_sel = st.selectbox(
+                                "Detalhar representantes de qual regional?",
+                                options=["(todas)"] + regionais,
+                            )
+                            if reg_sel != "(todas)":
+                                det = painel_rep[painel_rep["Regional"] == reg_sel].copy()
+                            else:
+                                det = painel_rep.copy()
+                            with st.expander("Detalhamento por representante (dentro do filtro de regional)"):
+                                display_table(
+                                    det.sort_values("Meta_Faturamento", ascending=False),
+                                    money_cols=["Meta_Faturamento", "Realizado", "Forecast", "GAP (R$)"],
+                                    pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"],
+                                )
+
+                    # ---------------- Visão por REPRESENTANTE ----------------
+                    else:
+                        st.markdown("#### Metas por representante – mês de referência")
+
+                        # Filtro opcional por regional
+                        regionais = sorted(painel_rep["Regional"].dropna().unique())
+                        reg_sel_multi = st.multiselect(
+                            "Filtrar por regional (opcional)",
+                            options=regionais,
+                        )
+                        painel_rep_view = painel_rep.copy()
+                        if reg_sel_multi:
+                            painel_rep_view = painel_rep_view[painel_rep_view["Regional"].isin(reg_sel_multi)]
+
+                        display_table(
+                            painel_rep_view.sort_values("Meta_Faturamento", ascending=False),
+                            money_cols=["Meta_Faturamento", "Realizado", "Forecast", "GAP (R$)"],
+                            pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"],
+                        )
+
+                        # gráfico: somente TOP N para não virar "cem palitos"
+                        st.markdown("##### Gráfico – Top N representantes")
+                        col_n, col_metric = st.columns([1, 1])
+                        with col_n:
+                            top_n = st.slider("Quantidade de representantes no gráfico", 5, 50, 20, step=5)
+                        with col_metric:
+                            metric_opt = st.selectbox(
+                                "Ordenar por",
+                                options=["Meta_Faturamento", "Realizado", "Forecast", "GAP (R$)"],
+                                index=1,
+                            )
+
+                        chart_rep = (
+                            painel_rep_view
+                            .sort_values(metric_opt, ascending=False)
+                            .head(top_n)
+                        )
+
+                        try:
+                            chart_long = chart_rep.melt(
+                                id_vars=["Representante"],
+                                value_vars=["Meta_Faturamento", "Forecast", "Realizado"],
+                                var_name="Tipo",
+                                value_name="Valor",
+                            )
+                            st.altair_chart(
+                                alt.Chart(chart_long).mark_bar().encode(
+                                    x=alt.X("Valor:Q", title="R$"),
+                                    y=alt.Y("Representante:N", sort="-x"),
+                                    color=alt.Color("Tipo:N", title=None),
+                                    tooltip=["Representante", "Tipo", alt.Tooltip("Valor:Q", format=",.0f")],
+                                ).properties(height=480),
+                                use_container_width=True,
+                            )
+                        except Exception:
+                            pass
+
+                    # necessidade diária por representante (continua existindo, independente da visão)
                     dias_restantes = dias_mes - dias_passados
                     if dias_restantes > 0:
                         painel_rep2 = painel_rep.copy()
                         painel_rep2["Necessidade por dia útil (R$)"] = np.where(
                             painel_rep2["Meta_Faturamento"] > painel_rep2["Forecast"],
                             (painel_rep2["Meta_Faturamento"] - painel_rep2["Forecast"]) / dias_restantes,
-                            0.0
+                            0.0,
                         )
-                        with st.expander("Necessidade de venda diária por representante para atingir meta do mês"):
+                        with st.expander(
+                            "Necessidade de venda diária por representante para atingir meta do mês "
+                            "(considerando forecast atual)"
+                        ):
                             display_table(
                                 painel_rep2.sort_values("Necessidade por dia útil (R$)", ascending=False),
-                                money_cols=["Necessidade por dia útil (R$)", "GAP (R$)",
-                                            "Meta_Faturamento", "Forecast", "Realizado"],
-                                pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"]
+                                money_cols=[
+                                    "Necessidade por dia útil (R$)",
+                                    "GAP (R$)",
+                                    "Meta_Faturamento",
+                                    "Forecast",
+                                    "Realizado",
+                                ],
+                                pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"],
                             )
                     else:
                         st.caption("Mês encerrado – sem dias restantes para cálculo de necessidade diária.")
