@@ -1,19 +1,20 @@
-# streamlit_app_brasforma_v20.py
-# Brasforma – Dashboard Comercial v20
-# - Mantém TODAS as abas anteriores
-# - NOVO:
-#   * Aba "Diretoria – Metas & Forecast" (metas por representante + forecast + gap)
-#   * Aba SEBASTIAN integrada com meta do representante e necessidade diária
-#   * Simulador conectado à meta via modo "Fechar GAP"
+# streamlit_app_brasforma_v21.py
+# Brasforma – Dashboard Comercial v21
+# Mantém TODAS as funcionalidades anteriores e evolui:
+# - Aba Clientes  -> visão de base ativa, novos, perdidos, Pareto, scatter
+# - Aba Produtos  -> mix, margem, ABC, scatter volume x margem
+# - Aba Representantes -> comparação, produtividade, dispersão
+# - Aba Geografia -> visão regional mais rica
+# - Aba Operacional -> KPIs e gráficos de lead time / atraso
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
 from pathlib import Path
-from fpdf import FPDF  # para geração de PDF
+from fpdf import FPDF
 
-st.set_page_config(page_title="Brasforma – Dashboard Comercial v20", layout="wide")
+st.set_page_config(page_title="Brasforma – Dashboard Comercial v21", layout="wide")
 
 # ---------------- Utils ----------------
 def to_num(x):
@@ -183,7 +184,6 @@ def load_data(path: str, sheet_name="Carteira de Vendas"):
 
     return df, qty_col
 
-# ---- Estimativa de elasticidade histórica por SKU ----
 @st.cache_data(show_spinner=False)
 def estimate_elasticities(df_source: pd.DataFrame, qty_col: str):
     if qty_col is None:
@@ -250,60 +250,49 @@ def estimate_elasticities(df_source: pd.DataFrame, qty_col: str):
         return pd.DataFrame(columns=["SKU","Elasticidade","N_Obs","R2"])
     return pd.DataFrame(results).sort_values("Elasticidade")
 
-# ---- Metas ----
 @st.cache_data(show_spinner=False)
 def load_goals(path="Metas_Brasforma.xlsx", sheet_name="Metas"):
     """
-    Espera um arquivo Metas_Brasforma.xlsx com uma aba de metas.
-    Procura a aba 'Metas' de forma case-insensitive (Metas, metas, METAS, etc).
+    Procura aba 'Metas' de forma case-insensitive.
     Colunas obrigatórias: Ano | Mes | Representante | Meta_Faturamento
     """
     p = Path(path)
     if not p.exists():
         return None
-
     try:
-        # abre o arquivo e descobre o nome real da aba, ignorando maiúsculas/minúsculas
         xls = pd.ExcelFile(p)
         target_sheet = None
         for sn in xls.sheet_names:
             if sn.strip().lower() == sheet_name.lower():
                 target_sheet = sn
                 break
-
-        # se não achar nenhuma aba equivalente a "Metas", devolve None
         if target_sheet is None:
             return None
-
         metas = pd.read_excel(xls, sheet_name=target_sheet)
     except Exception:
         return None
 
     metas.columns = [c.strip() for c in metas.columns]
-
-    # garantir que a coluna de meta tenha o nome padrão
     if "Meta_Faturamento" not in metas.columns:
         for c in metas.columns:
             if "meta" in c.lower() and ("fat" in c.lower() or "fatur" in c.lower()):
                 metas = metas.rename(columns={c: "Meta_Faturamento"})
                 break
 
-    required = {"Ano", "Mes", "Representante", "Meta_Faturamento"}
+    required = {"Ano","Mes","Representante","Meta_Faturamento"}
     if not required.issubset(metas.columns):
         return None
 
     metas["Ano"] = pd.to_numeric(metas["Ano"], errors="coerce").astype("Int64")
     metas["Mes"] = pd.to_numeric(metas["Mes"], errors="coerce").astype("Int64")
     metas["Meta_Faturamento"] = pd.to_numeric(metas["Meta_Faturamento"], errors="coerce")
-    metas = metas.dropna(subset=["Ano", "Mes", "Representante", "Meta_Faturamento"])
-
+    metas = metas.dropna(subset=["Ano","Mes","Representante","Meta_Faturamento"])
     metas["Representante"] = metas["Representante"].astype(str).str.strip()
 
     if "Meta_Margem_Bruta" in metas.columns:
         metas["Meta_Margem_Bruta"] = pd.to_numeric(metas["Meta_Margem_Bruta"], errors="coerce")
 
     return metas
-
 
 # ---------------- Fonte de dados ----------------
 DEFAULT_DATA = "Dashboard - Comite Semanal - Brasforma IA (1).xlsx"
@@ -315,14 +304,21 @@ data_path = uploaded if uploaded is not None else (DEFAULT_DATA if Path(DEFAULT_
 st.sidebar.caption(f"Arquivo em uso: **{data_path}**")
 
 df, qty_col = load_data(data_path)
-goals_df = load_goals()  # metas opcionais
+goals_df = load_goals()
 
 # ---------------- Filtros globais ----------------
 st.sidebar.title("Filtros")
-if "Data / Mês" in df.columns:
-    min_date = pd.to_datetime(df["Data / Mês"]).min()
-    max_date = pd.to_datetime(df["Data / Mês"]).max()
-    d_ini, d_fim = st.sidebar.date_input("Período (Data / Mês)", value=(min_date, max_date))
+if "Data do Pedido" in df.columns and df["Data do Pedido"].notna().any():
+    date_col_main = "Data do Pedido"
+elif "Data / Mês" in df.columns:
+    date_col_main = "Data / Mês"
+else:
+    date_col_main = None
+
+if date_col_main is not None:
+    min_date = pd.to_datetime(df[date_col_main]).min()
+    max_date = pd.to_datetime(df[date_col_main]).max()
+    d_ini, d_fim = st.sidebar.date_input("Período (data principal)", value=(min_date, max_date))
 else:
     d_ini = d_fim = None
 
@@ -336,8 +332,8 @@ show_neg = st.sidebar.checkbox("Mostrar apenas linhas com margem negativa", valu
 
 def apply_filters(_df):
     flt = _df.copy()
-    if "Data / Mês" in flt.columns and d_ini is not None:
-        flt = flt[(flt["Data / Mês"] >= pd.to_datetime(d_ini)) & (flt["Data / Mês"] <= pd.to_datetime(d_fim))]
+    if date_col_main is not None and d_ini is not None:
+        flt = flt[(flt[date_col_main] >= pd.to_datetime(d_ini)) & (flt[date_col_main] <= pd.to_datetime(d_fim))]
     if reg:
         flt = flt[flt["Regional"].isin(reg)]
     if rep:
@@ -388,7 +384,7 @@ tabs = st.tabs([
 (tab_dir, tab_exec, tab_rfm, tab_profit, tab_cli, tab_sku,
  tab_rep, tab_geo, tab_ops, tab_pareto, tab_seb, tab_sim, tab_export) = tabs
 
-# ---------------- Diretoria – Metas & Forecast ----------------
+# ---------------- Diretoria – Metas & Forecast (upgrade com Regional) ----------------
 with tab_dir:
     st.subheader("Diretoria – Metas & Forecast (mensal)")
 
@@ -398,22 +394,13 @@ with tab_dir:
             "Esperado: aba 'Metas' com colunas Ano, Mes, Representante, Meta_Faturamento."
         )
     else:
-        # coluna de data para forecast
-        if "Data do Pedido" in df.columns and df["Data do Pedido"].notna().any():
-            date_col_fore = "Data do Pedido"
-        elif "Data / Mês" in df.columns:
-            date_col_fore = "Data / Mês"
-        else:
-            date_col_fore = None
-
-        if date_col_fore is None:
+        if date_col_main is None:
             st.warning("Não foi encontrada coluna de data para cálculo de forecast.")
         else:
-            # mês de referência: fim do filtro
             if d_fim is not None:
                 ref_date = pd.to_datetime(d_fim)
             else:
-                ref_date = pd.to_datetime(df[date_col_fore].dropna().max())
+                ref_date = pd.to_datetime(df[date_col_main].dropna().max())
             ano_ref = ref_date.year
             mes_ref = ref_date.month
 
@@ -426,9 +413,8 @@ with tab_dir:
                     "Cadastre metas para liberar essa visão."
                 )
             else:
-                # Fatos do mês até a data de referência (base toda, ignorando filtros laterais)
-                df_month = df[df[date_col_fore].dt.to_period("M") == pd.Period(ref_date, "M")].copy()
-                df_month = df_month[df_month[date_col_fore] <= ref_date]
+                df_month = df[df[date_col_main].dt.to_period("M") == pd.Period(ref_date, "M")].copy()
+                df_month = df_month[df_month[date_col_main] <= ref_date]
 
                 if "Valor Pedido R$" not in df_month.columns:
                     st.warning("Coluna 'Valor Pedido R$' é obrigatória para cálculo de realizado e forecast.")
@@ -436,7 +422,6 @@ with tab_dir:
                     dias_mes = pd.Period(ref_date, "M").days_in_month
                     dias_passados = ref_date.day
 
-                    # realizado e forecast total da empresa
                     fat_real_total = df_month["Valor Pedido R$"].sum()
                     fat_fore_total = fat_real_total / dias_passados * dias_mes if dias_passados > 0 else np.nan
                     meta_total = metas_ref["Meta_Faturamento"].sum()
@@ -455,7 +440,6 @@ with tab_dir:
                     else:
                         c4.metric("Atingimento projetado", "-")
 
-                    # ---------------- NOVO: seletor de nível de análise ----------------
                     st.markdown("### Metas por hierarquia comercial")
                     nivel = st.radio(
                         "Nível de análise",
@@ -464,7 +448,6 @@ with tab_dir:
                         horizontal=True,
                     )
 
-                    # mapa Representante -> Regional (usando base historica)
                     if {"Representante", "Regional"}.issubset(df.columns):
                         map_rep_reg = (
                             df[["Representante", "Regional"]]
@@ -474,7 +457,6 @@ with tab_dir:
                     else:
                         map_rep_reg = pd.DataFrame(columns=["Representante", "Regional"])
 
-                    # realizado por representante no mês
                     if "Representante" in df_month.columns:
                         real_rep = (
                             df_month.groupby("Representante", as_index=False)["Valor Pedido R$"]
@@ -485,7 +467,6 @@ with tab_dir:
                         real_rep = pd.DataFrame(columns=["Representante", "Realizado"])
 
                     real_rep["Realizado"] = pd.to_numeric(real_rep["Realizado"], errors="coerce").fillna(0.0)
-                    # forecast por representante = realizado até a data * fator de projeção
                     if dias_passados > 0:
                         real_rep["Forecast"] = real_rep["Realizado"] / dias_passados * dias_mes
                     else:
@@ -497,7 +478,6 @@ with tab_dir:
                     )
                     metas_ref_rep["Representante"] = metas_ref_rep["Representante"].astype(str).str.strip()
 
-                    # painel base por representante (independente da visualização escolhida)
                     painel_rep = real_rep.merge(metas_ref_rep, on="Representante", how="outer")
                     painel_rep["Realizado"] = painel_rep["Realizado"].fillna(0.0)
                     painel_rep["Forecast"] = painel_rep["Forecast"].fillna(painel_rep["Realizado"])
@@ -515,13 +495,11 @@ with tab_dir:
                     )
                     painel_rep["GAP (R$)"] = painel_rep["Meta_Faturamento"] - painel_rep["Forecast"]
 
-                    # anexa regional quando existir
                     if not map_rep_reg.empty:
                         painel_rep = painel_rep.merge(map_rep_reg, on="Representante", how="left")
                     else:
                         painel_rep["Regional"] = "SEM REGIONAL"
 
-                    # ---------------- Visão por REGIONAL ----------------
                     if nivel == "Regional":
                         painel_reg = (
                             painel_rep.groupby("Regional", as_index=False)
@@ -550,7 +528,6 @@ with tab_dir:
                             pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"],
                         )
 
-                        # gráfico por regional
                         try:
                             chart_df = painel_reg.copy()
                             chart_long = chart_df.melt(
@@ -571,7 +548,6 @@ with tab_dir:
                         except Exception:
                             pass
 
-                        # detalhamento opcional: ranking de representantes dentro de uma regional escolhida
                         regionais = sorted(painel_reg["Regional"].dropna().unique())
                         if regionais:
                             reg_sel = st.selectbox(
@@ -589,11 +565,9 @@ with tab_dir:
                                     pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"],
                                 )
 
-                    # ---------------- Visão por REPRESENTANTE ----------------
                     else:
                         st.markdown("#### Metas por representante – mês de referência")
 
-                        # Filtro opcional por regional
                         regionais = sorted(painel_rep["Regional"].dropna().unique())
                         reg_sel_multi = st.multiselect(
                             "Filtrar por regional (opcional)",
@@ -609,7 +583,6 @@ with tab_dir:
                             pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"],
                         )
 
-                        # gráfico: somente TOP N para não virar "cem palitos"
                         st.markdown("##### Gráfico – Top N representantes")
                         col_n, col_metric = st.columns([1, 1])
                         with col_n:
@@ -626,7 +599,6 @@ with tab_dir:
                             .sort_values(metric_opt, ascending=False)
                             .head(top_n)
                         )
-
                         try:
                             chart_long = chart_rep.melt(
                                 id_vars=["Representante"],
@@ -646,7 +618,6 @@ with tab_dir:
                         except Exception:
                             pass
 
-                    # necessidade diária por representante (continua existindo, independente da visão)
                     dias_restantes = dias_mes - dias_passados
                     if dias_restantes > 0:
                         painel_rep2 = painel_rep.copy()
@@ -893,48 +864,372 @@ with tab_profit:
         cols_show = [c for c in ["Nome Cliente","Pedido","ITEM","Representante","UF","Valor Pedido R$","Custo","Custo Total","Lucro Bruto","Margem %","Data do Pedido","Data / Mês"] if c in neg.columns]
         display_table(neg[cols_show], money_cols=["Valor Pedido R$","Custo","Custo Total","Lucro Bruto"], pct_cols=["Margem %"])
 
-# ---------------- Clientes ----------------
+# ---------------- Clientes (upgrade) ----------------
 with tab_cli:
-    st.subheader("Clientes – Faturamento")
-    if {"Nome Cliente","Valor Pedido R$"}.issubset(flt.columns):
-        top_cli = flt.groupby("Nome Cliente", as_index=False)["Valor Pedido R$"].sum().sort_values("Valor Pedido R$", ascending=False)
-        display_table(top_cli.head(50), money_cols=["Valor Pedido R$"])
+    st.subheader("Clientes – Base ativa, expansão e risco")
 
-# ---------------- Produtos ----------------
+    if "Nome Cliente" not in df.columns or date_col_main is None or "Valor Pedido R$" not in df.columns:
+        st.info("A visão de Clientes exige colunas 'Nome Cliente', data e 'Valor Pedido R$'.")
+    else:
+        d_ini_ts = pd.to_datetime(d_ini) if d_ini is not None else df[date_col_main].min()
+        d_fim_ts = pd.to_datetime(d_fim) if d_fim is not None else df[date_col_main].max()
+
+        df_cli_periodo = flt.dropna(subset=["Nome Cliente"]).copy()
+        df_cli_periodo = df_cli_periodo[df_cli_periodo[date_col_main].between(d_ini_ts, d_fim_ts)]
+
+        # métricas de carteira
+        clientes_ativos = df_cli_periodo["Nome Cliente"].nunique()
+
+        # first/last buy usando base global (não só filtro)
+        grp_dates = df.groupby("Nome Cliente")[date_col_main]
+        first_buy = grp_dates.min()
+        last_buy = grp_dates.max()
+
+        clientes_periodo = set(df_cli_periodo["Nome Cliente"].unique())
+        clientes_novos = [c for c in clientes_periodo if first_buy[c] >= d_ini_ts]
+
+        janela_previa_ini = d_ini_ts - pd.DateOffset(months=12)
+        prev_mask = (last_buy >= janela_previa_ini) & (last_buy < d_ini_ts)
+        clientes_prev = set(last_buy[prev_mask].index)
+        clientes_perdidos = sorted(clientes_prev - clientes_periodo)
+        base_12m = set(last_buy[(last_buy >= janela_previa_ini) & (last_buy <= d_fim_ts)].index)
+
+        valor_total = df_cli_periodo["Valor Pedido R$"].sum()
+        n_ped_cli = df_cli_periodo["Pedido"].nunique() if "Pedido" in df_cli_periodo.columns else len(df_cli_periodo)
+        ticket_med_cli = valor_total / n_ped_cli if n_ped_cli else np.nan
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Clientes ativos no período", fmt_int(clientes_ativos))
+        c2.metric("Clientes novos no período", fmt_int(len(clientes_novos)))
+        c3.metric("Clientes perdidos (vs últimos 12m)", fmt_int(len(clientes_perdidos)))
+        c4.metric("Ticket médio por pedido", fmt_money(ticket_med_cli) if pd.notna(ticket_med_cli) else "-")
+
+        # Ranking de clientes (Pareto dentro do filtro)
+        st.markdown("### Ranking de clientes (faturamento do período)")
+        rank_cli = (
+            df_cli_periodo.groupby("Nome Cliente", as_index=False)["Valor Pedido R$"]
+            .sum()
+            .sort_values("Valor Pedido R$", ascending=False)
+        )
+        if not rank_cli.empty:
+            rank_cli["% do total"] = 100 * rank_cli["Valor Pedido R$"] / rank_cli["Valor Pedido R$"].sum()
+            rank_cli["% acumulado"] = rank_cli["% do total"].cumsum()
+            display_table(rank_cli.head(100), money_cols=["Valor Pedido R$"], pct_cols=["% do total","% acumulado"])
+
+            st.altair_chart(
+                alt.Chart(rank_cli.head(40)).mark_bar().encode(
+                    x=alt.X("Valor Pedido R$:Q", title="Faturamento (R$)"),
+                    y=alt.Y("Nome Cliente:N", sort="-x"),
+                    tooltip=["Nome Cliente", alt.Tooltip("Valor Pedido R$:Q", format=",.0f")]
+                ).properties(height=500),
+                use_container_width=True
+            )
+
+        # Scatter valor x margem por cliente
+        if {"Lucro Bruto","Valor Pedido R$"}.issubset(df_cli_periodo.columns):
+            st.markdown("### Dispersão – Faturamento x Margem por cliente (filtro atual)")
+            cli_disp = df_cli_periodo.groupby("Nome Cliente", as_index=False).agg({
+                "Valor Pedido R$":"sum",
+                "Lucro Bruto":"sum"
+            })
+            cli_disp["Margem %"] = np.where(cli_disp["Valor Pedido R$"]>0, 100*cli_disp["Lucro Bruto"]/cli_disp["Valor Pedido R$"], np.nan)
+            st.altair_chart(
+                alt.Chart(cli_disp).mark_circle(size=70).encode(
+                    x=alt.X("Valor Pedido R$:Q", title="Faturamento (R$)"),
+                    y=alt.Y("Margem %:Q", title="Margem (%)"),
+                    tooltip=["Nome Cliente", alt.Tooltip("Valor Pedido R$:Q", format=",.0f"), alt.Tooltip("Margem %:Q", format=",.1f")]
+                ).properties(height=420),
+                use_container_width=True
+            )
+
+        with st.expander("Clientes novos e perdidos – listas rápidas"):
+            col_n, col_p = st.columns(2)
+            if clientes_novos:
+                col_n.markdown("**Clientes novos (primeira compra no período)**")
+                col_n.write(", ".join(sorted(clientes_novos[:80])) + (" ..." if len(clientes_novos) > 80 else ""))
+            else:
+                col_n.caption("Sem clientes novos no período.")
+
+            if clientes_perdidos:
+                col_p.markdown("**Clientes perdidos (compravam até 12m antes e não compraram no período)**")
+                col_p.write(", ".join(clientes_perdidos[:80]) + (" ..." if len(clientes_perdidos) > 80 else ""))
+            else:
+                col_p.caption("Sem clientes claramente perdidos na janela analisada.")
+
+# ---------------- Produtos (upgrade) ----------------
 with tab_sku:
-    st.subheader("Produtos – Faturamento")
-    if {"ITEM","Valor Pedido R$"}.issubset(flt.columns):
-        top_sku = flt.groupby("ITEM", as_index=False)["Valor Pedido R$"].sum().sort_values("Valor Pedido R$", ascending=False)
-        display_table(top_sku.head(100), money_cols=["Valor Pedido R$"])
+    st.subheader("Produtos – Mix, margem e curva ABC")
 
-# ---------------- Representantes ----------------
+    if "ITEM" not in df.columns or "Valor Pedido R$" not in df.columns:
+        st.info("A aba Produtos exige colunas 'ITEM' e 'Valor Pedido R$'.")
+    else:
+        df_prod_periodo = flt.copy()
+        if qty_col is not None and qty_col in df_prod_periodo.columns:
+            df_prod_periodo[qty_col] = df_prod_periodo[qty_col].apply(to_num)
+        else:
+            df_prod_periodo[qty_col] = np.nan
+
+        grup = df_prod_periodo.groupby("ITEM", as_index=False).agg({
+            "Valor Pedido R$":"sum",
+            "Lucro Bruto":"sum",
+            qty_col:"sum"
+        }).rename(columns={qty_col:"Quantidade"})
+
+        grup["Margem %"] = np.where(grup["Valor Pedido R$"]>0, 100*grup["Lucro Bruto"]/grup["Valor Pedido R$"], np.nan)
+
+        skus_ativos = grup["ITEM"].nunique()
+        skus_totais = df["ITEM"].nunique()
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("SKUs ativos no período", fmt_int(skus_ativos))
+        c2.metric("SKUs totais na base", fmt_int(skus_totais))
+        c3.metric("Produtos com margem negativa", fmt_int((grup["Margem %"]<0).sum()))
+
+        st.markdown("### Ranking de produtos (faturamento)")
+        display_table(
+            grup.sort_values("Valor Pedido R$", ascending=False).head(100),
+            money_cols=["Valor Pedido R$","Lucro Bruto"],
+            pct_cols=["Margem %"],
+            int_cols=["Quantidade"]
+        )
+
+        # Curva ABC por faturamento
+        if not grup.empty:
+            abc = grup.sort_values("Valor Pedido R$", ascending=False).copy()
+            abc["%Acum"] = 100 * abc["Valor Pedido R$"].cumsum() / abc["Valor Pedido R$"].sum()
+            abc["Classe"] = abc["%Acum"].apply(lambda p: "A" if p<=80 else ("B" if p<=95 else "C"))
+
+            st.markdown("### Curva ABC – faturamento por SKU")
+            display_table(abc.head(150), money_cols=["Valor Pedido R$"], pct_cols=["%Acum"])
+
+            st.altair_chart(
+                alt.Chart(abc.head(80)).mark_bar().encode(
+                    x=alt.X("ITEM:N", sort=None, title="SKU"),
+                    y=alt.Y("Valor Pedido R$:Q", title="Faturamento (R$)"),
+                    color=alt.Color("Classe:N"),
+                    tooltip=["ITEM", alt.Tooltip("Valor Pedido R$:Q", format=",.0f"), "Classe","%Acum"]
+                ).properties(height=420),
+                use_container_width=True
+            )
+
+        # Scatter volume x margem
+        st.markdown("### Dispersão – Volume x Margem (%)")
+        st.altair_chart(
+            alt.Chart(grup.dropna(subset=["Quantidade"])).mark_circle(size=70).encode(
+                x=alt.X("Quantidade:Q", title="Quantidade vendida"),
+                y=alt.Y("Margem %:Q", title="Margem (%)"),
+                tooltip=["ITEM","Quantidade", alt.Tooltip("Valor Pedido R$:Q", format=",.0f"), alt.Tooltip("Margem %:Q", format=",.1f")]
+            ).properties(height=420),
+            use_container_width=True
+        )
+
+# ---------------- Representantes (upgrade) ----------------
 with tab_rep:
-    st.subheader("Representantes – Faturamento")
-    if {"Representante","Valor Pedido R$"}.issubset(flt.columns):
-        por_rep_fat = flt.groupby("Representante", as_index=False)["Valor Pedido R$"].sum().sort_values("Valor Pedido R$", ascending=False)
-        display_table(por_rep_fat.head(100), money_cols=["Valor Pedido R$"])
+    st.subheader("Representantes – Comparativo de performance")
 
-# ---------------- Geografia ----------------
+    if "Representante" not in df.columns or "Valor Pedido R$" not in df.columns:
+        st.info("A aba Representantes exige colunas 'Representante' e 'Valor Pedido R$'.")
+    else:
+        df_rep_per = flt.copy()
+
+        if "Nome Cliente" in df_rep_per.columns:
+            fat_rep = df_rep_per.groupby("Representante", as_index=False).agg({
+                "Valor Pedido R$":"sum",
+                "Lucro Bruto":"sum",
+                "Nome Cliente":"nunique"
+            }).rename(columns={"Nome Cliente":"Clientes Ativos"})
+        else:
+            fat_rep = df_rep_per.groupby("Representante", as_index=False).agg({
+                "Valor Pedido R$":"sum",
+                "Lucro Bruto":"sum"
+            })
+            fat_rep["Clientes Ativos"] = np.nan
+
+        if "Pedido" in df_rep_per.columns:
+            ped_rep = df_rep_per.groupby("Representante", as_index=False)["Pedido"].nunique().rename(columns={"Pedido":"Pedidos"})
+            fat_rep = fat_rep.merge(ped_rep, on="Representante", how="left")
+        else:
+            fat_rep["Pedidos"] = np.nan
+
+        fat_rep["Ticket Médio"] = np.where(fat_rep["Pedidos"]>0, fat_rep["Valor Pedido R$"]/fat_rep["Pedidos"], np.nan)
+        fat_rep["Margem %"] = np.where(fat_rep["Valor Pedido R$"]>0, 100*fat_rep["Lucro Bruto"]/fat_rep["Valor Pedido R$"], np.nan)
+
+        reps_ativos = fat_rep["Representante"].nunique()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Representantes ativos no período", fmt_int(reps_ativos))
+        c2.metric("Ticket médio global", fmt_money(fat_rep["Ticket Médio"].mean()) if len(fat_rep)>0 else "-")
+        c3.metric("Clientes médios por representante", fmt_int(fat_rep["Clientes Ativos"].mean()) if "Clientes Ativos" in fat_rep.columns else "-")
+
+        st.markdown("### Ranking de representantes")
+        display_table(
+            fat_rep.sort_values("Valor Pedido R$", ascending=False),
+            money_cols=["Valor Pedido R$","Lucro Bruto","Ticket Médio"],
+            pct_cols=["Margem %"],
+            int_cols=["Clientes Ativos","Pedidos"]
+        )
+
+        # Gráfico Top N reps
+        top_n_rep = st.slider("Top N representantes no gráfico", 5, 40, 20, step=5)
+        chart_rep = fat_rep.sort_values("Valor Pedido R$", ascending=False).head(top_n_rep)
+
+        st.altair_chart(
+            alt.Chart(chart_rep).mark_bar().encode(
+                x=alt.X("Valor Pedido R$:Q", title="Faturamento (R$)"),
+                y=alt.Y("Representante:N", sort="-x"),
+                tooltip=["Representante", alt.Tooltip("Valor Pedido R$:Q", format=",.0f"), alt.Tooltip("Margem %:Q", format=",.1f")]
+            ).properties(height=480),
+            use_container_width=True
+        )
+
+        # Dispersão produtividade x margem
+        st.markdown("### Dispersão – Produtividade x Margem por representante")
+        fat_rep["Produtividade (R$ / cliente)"] = np.where(
+            fat_rep["Clientes Ativos"]>0, fat_rep["Valor Pedido R$"]/fat_rep["Clientes Ativos"], np.nan
+        )
+        st.altair_chart(
+            alt.Chart(fat_rep).mark_circle(size=70).encode(
+                x=alt.X("Produtividade (R$ / cliente):Q", title="R$ por cliente"),
+                y=alt.Y("Margem %:Q", title="Margem (%)"),
+                tooltip=[
+                    "Representante",
+                    alt.Tooltip("Valor Pedido R$:Q", format=",.0f"),
+                    alt.Tooltip("Clientes Ativos:Q"),
+                    alt.Tooltip("Produtividade (R$ / cliente):Q", format=",.0f"),
+                    alt.Tooltip("Margem %:Q", format=",.1f")
+                ]
+            ).properties(height=420),
+            use_container_width=True
+        )
+
+# ---------------- Geografia (upgrade) ----------------
 with tab_geo:
-    st.subheader("Geografia – Faturamento por UF")
-    if {"UF","Valor Pedido R$"}.issubset(flt.columns):
-        por_uf_fat = flt.groupby("UF", as_index=False)["Valor Pedido R$"].sum().sort_values("Valor Pedido R$", ascending=False)
-        display_table(por_uf_fat, money_cols=["Valor Pedido R$"])
+    st.subheader("Geografia – Cobertura e performance por UF")
 
-# ---------------- Operacional ----------------
+    if "UF" not in df.columns or "Valor Pedido R$" not in df.columns:
+        st.info("A aba Geografia exige colunas 'UF' e 'Valor Pedido R$'.")
+    else:
+        geo = flt.copy()
+        fat_uf = geo.groupby("UF", as_index=False).agg({
+            "Valor Pedido R$":"sum",
+            "Lucro Bruto":"sum"
+        })
+        if "Pedido" in geo.columns:
+            fat_uf["Pedidos"] = geo.groupby("UF")["Pedido"].nunique().values
+        else:
+            fat_uf["Pedidos"] = np.nan
+
+        if "Nome Cliente" in geo.columns:
+            fat_uf["Clientes"] = geo.groupby("UF")["Nome Cliente"].nunique().values
+        else:
+            fat_uf["Clientes"] = np.nan
+
+        fat_uf["Margem %"] = np.where(fat_uf["Valor Pedido R$"]>0, 100*fat_uf["Lucro Bruto"]/fat_uf["Valor Pedido R$"], np.nan)
+
+        total_fat = fat_uf["Valor Pedido R$"].sum()
+        fat_uf["% Part"] = np.where(total_fat>0, 100*fat_uf["Valor Pedido R$"]/total_fat, np.nan)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Faturamento total (filtro)", fmt_money(total_fat))
+        c2.metric("UFs ativas no período", fmt_int(fat_uf["UF"].nunique()))
+        c3.metric("Maior participação (%)", fmt_pct_safe(fat_uf["% Part"].max()) if not fat_uf.empty else "-")
+
+        st.markdown("### Ranking de UFs")
+        display_table(
+            fat_uf.sort_values("Valor Pedido R$", ascending=False),
+            money_cols=["Valor Pedido R$","Lucro Bruto"],
+            pct_cols=["Margem %","% Part"],
+            int_cols=["Pedidos","Clientes"]
+        )
+
+        st.markdown("### Faturamento por UF")
+        st.altair_chart(
+            alt.Chart(fat_uf.sort_values("Valor Pedido R$", ascending=False)).mark_bar().encode(
+                x=alt.X("Valor Pedido R$:Q", title="Faturamento (R$)"),
+                y=alt.Y("UF:N", sort="-x"),
+                tooltip=["UF", alt.Tooltip("Valor Pedido R$:Q", format=",.0f"), alt.Tooltip("% Part:Q", format=".1f")]
+            ).properties(height=420),
+            use_container_width=True
+        )
+
+        st.markdown("### Margem por UF")
+        st.altair_chart(
+            alt.Chart(fat_uf.sort_values("Margem %", ascending=False)).mark_bar().encode(
+                x=alt.X("Margem %:Q", title="Margem (%)"),
+                y=alt.Y("UF:N", sort="-x"),
+                tooltip=["UF", alt.Tooltip("Margem %:Q", format=".1f")]
+            ).properties(height=420),
+            use_container_width=True
+        )
+
+# ---------------- Operacional (upgrade) ----------------
 with tab_ops:
-    st.subheader("Operacional – Lead Time & Atraso")
-    c1, c2 = st.columns(2)
-    if "LeadTime (dias)" in flt.columns:
-        with c1:
-            lt = flt["LeadTime (dias)"].dropna()
-            if len(lt)>0:
-                desc = pd.Series(lt).describe()[["count","mean","50%","min","max"]].rename({"50%":"mediana"})
-                display_table(desc.to_frame("LeadTime (dias)").T, int_cols=["count","min","max"])
-    if "Atrasado / No prazo" in flt.columns and "Pedido" in flt.columns:
-        with c2:
-            atrasos = flt.groupby("Atrasado / No prazo", as_index=False)["Pedido"].nunique().rename(columns={"Pedido":"Qtde Pedidos"})
+    st.subheader("Operacional – Lead time, atrasos e execução")
+
+    df_ops = flt.copy()
+
+    if "LeadTime (dias)" in df_ops.columns:
+        lt = df_ops["LeadTime (dias)"].dropna()
+    else:
+        lt = pd.Series([], dtype=float)
+
+    if "AtrasadoFlag" in df_ops.columns:
+        atrasados = df_ops["AtrasadoFlag"].fillna(False)
+    else:
+        atrasados = pd.Series([False]*len(df_ops), index=df_ops.index)
+
+    total_pedidos = df_ops["Pedido"].nunique() if "Pedido" in df_ops.columns else len(df_ops)
+    pedidos_atrasados = df_ops.loc[atrasados, "Pedido"].nunique() if "Pedido" in df_ops.columns else atrasados.sum()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Pedidos (filtro)", fmt_int(total_pedidos))
+    c2.metric("Pedidos com atraso", fmt_int(pedidos_atrasados))
+    c3.metric("% de pedidos atrasados", fmt_pct_safe(100*pedidos_atrasados/total_pedidos) if total_pedidos else "-")
+    c4.metric("Lead time médio (dias)", fmt_int(lt.mean()) if len(lt)>0 else "-")
+
+    col_l1, col_l2 = st.columns(2)
+    with col_l1:
+        if len(lt)>0:
+            st.markdown("### Distribuição de Lead Time (dias)")
+            hist_df = pd.DataFrame({"LeadTime": lt})
+            st.altair_chart(
+                alt.Chart(hist_df).mark_bar().encode(
+                    x=alt.X("LeadTime:Q", bin=alt.Bin(maxbins=20), title="Lead time (dias)"),
+                    y=alt.Y("count()", title="Qtde"),
+                    tooltip=[alt.Tooltip("count():Q", title="Qtde")]
+                ).properties(height=320),
+                use_container_width=True
+            )
+    with col_l2:
+        if "Atrasado / No prazo" in df_ops.columns and "Pedido" in df_ops.columns:
+            atrasos = df_ops.groupby("Atrasado / No prazo", as_index=False)["Pedido"].nunique().rename(columns={"Pedido":"Qtde Pedidos"})
             display_table(atrasos, int_cols=["Qtde Pedidos"])
+            st.altair_chart(
+                alt.Chart(atrasos).mark_bar().encode(
+                    x=alt.X("Qtde Pedidos:Q", title="Pedidos"),
+                    y=alt.Y("Atrasado / No prazo:N", sort="-x", title="Status"),
+                    tooltip=["Atrasado / No prazo","Qtde Pedidos"]
+                ).properties(height=320),
+                use_container_width=True
+            )
+
+    # Pedidos em aberto / em produção
+    st.markdown("### Pedidos em aberto e em produção")
+    if "Status de Produção / Faturamento" in df_ops.columns:
+        status_series = df_ops["Status de Produção / Faturamento"].astype(str)
+        is_aberto = status_series.str.contains("abert|pend|prod", case=False, na=False) & ~status_series.str.contains("fatur", case=False, na=False)
+        df_abertos = df_ops[is_aberto].copy()
+        if not df_abertos.empty:
+            if "Pedido" in df_abertos.columns:
+                resumo_abertos = df_abertos.groupby("Pedido", as_index=False).agg({
+                    "Valor Pedido R$":"sum",
+                    "Nome Cliente":"first",
+                    date_col_main:"max"
+                }).rename(columns={"Valor Pedido R$":"Valor Pedido","Nome Cliente":"Cliente",date_col_main:"Data Última Atualização"})
+                display_table(resumo_abertos.sort_values("Valor Pedido", ascending=False), money_cols=["Valor Pedido"])
+            else:
+                display_table(df_abertos, money_cols=["Valor Pedido R$"])
+        else:
+            st.caption("Nenhum pedido em aberto / produção no filtro atual.")
 
 # ---------------- Pareto / ABC ----------------
 with tab_pareto:
@@ -951,7 +1246,7 @@ with tab_pareto:
             s["Classe"] = s["%Acum"].apply(lambda p: "A" if p<=80 else ("B" if p<=95 else "C"))
             display_table(s.head(300), money_cols=["Valor Pedido R$"], pct_cols=["%Acum"])
 
-# ---------------- SEBASTIAN – cockpit do representante (com meta) ----------------
+# ---------------- SEBASTIAN (mantido igual à versão anterior) ----------------
 with tab_seb:
     st.subheader("SEBASTIAN – Desempenho Individual do Representante")
 
@@ -1777,7 +2072,6 @@ with tab_export:
     st.download_button("Baixar CSV filtrado", data=flt.to_csv(index=False).encode("utf-8-sig"), file_name="brasforma_filtrado.csv", mime="text/csv")
     with st.expander("Prévia dos dados filtrados"):
         st.dataframe(flt)
-
 if qty_col:
     st.caption(f"✓ Custo calculado como **unitário × quantidade**. Coluna de quantidade detectada: **{qty_col}**.")
 else:
