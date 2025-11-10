@@ -1,10 +1,10 @@
-# streamlit_app_brasforma_v19.py
-# Brasforma – Dashboard Comercial v19
+# streamlit_app_brasforma_v20.py
+# Brasforma – Dashboard Comercial v20
 # - Mantém TODAS as abas anteriores
-# - Aba SEBASTIAN reforçada:
-#   * Indicadores avançados (ticket, ativação, churn, concentração Top 5)
-#   * Pipeline por status (R$ e quantidade)
-#   * Família = coluna I (Observação)
+# - NOVO:
+#   * Aba "Diretoria – Metas & Forecast" (metas por representante + forecast + gap)
+#   * Aba SEBASTIAN integrada com meta do representante e necessidade diária
+#   * Simulador conectado à meta via modo "Fechar GAP"
 
 import streamlit as st
 import pandas as pd
@@ -13,7 +13,7 @@ import altair as alt
 from pathlib import Path
 from fpdf import FPDF  # para geração de PDF
 
-st.set_page_config(page_title="Brasforma – Dashboard Comercial v19", layout="wide")
+st.set_page_config(page_title="Brasforma – Dashboard Comercial v20", layout="wide")
 
 # ---------------- Utils ----------------
 def to_num(x):
@@ -250,6 +250,44 @@ def estimate_elasticities(df_source: pd.DataFrame, qty_col: str):
         return pd.DataFrame(columns=["SKU","Elasticidade","N_Obs","R2"])
     return pd.DataFrame(results).sort_values("Elasticidade")
 
+# ---- Metas ----
+@st.cache_data(show_spinner=False)
+def load_goals(path="Metas_Brasforma.xlsx", sheet_name="Metas"):
+    """
+    Espera um arquivo Metas_Brasforma.xlsx com aba Metas e colunas:
+    Ano | Mes | Representante | Meta_Faturamento
+    """
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        metas = pd.read_excel(p, sheet_name=sheet_name)
+    except Exception:
+        return None
+
+    metas.columns = [c.strip() for c in metas.columns]
+    if "Meta_Faturamento" not in metas.columns:
+        for c in metas.columns:
+            if "meta" in c.lower() and ("fat" in c.lower() or "fatur" in c.lower()):
+                metas = metas.rename(columns={c: "Meta_Faturamento"})
+                break
+
+    required = {"Ano","Mes","Representante","Meta_Faturamento"}
+    if not required.issubset(metas.columns):
+        return None
+
+    metas["Ano"] = pd.to_numeric(metas["Ano"], errors="coerce").astype("Int64")
+    metas["Mes"] = pd.to_numeric(metas["Mes"], errors="coerce").astype("Int64")
+    metas["Meta_Faturamento"] = pd.to_numeric(metas["Meta_Faturamento"], errors="coerce")
+    metas = metas.dropna(subset=["Ano","Mes","Representante","Meta_Faturamento"])
+
+    metas["Representante"] = metas["Representante"].astype(str).str.strip()
+    if "Meta_Margem_Bruta" in metas.columns:
+        metas["Meta_Margem_Bruta"] = pd.to_numeric(metas["Meta_Margem_Bruta"], errors="coerce")
+
+    return metas
+
+# ---------------- Fonte de dados ----------------
 DEFAULT_DATA = "Dashboard - Comite Semanal - Brasforma IA (1).xlsx"
 ALT_DATA = "Dashboard - Comite Semanal - Brasforma (1).xlsx"
 
@@ -259,7 +297,9 @@ data_path = uploaded if uploaded is not None else (DEFAULT_DATA if Path(DEFAULT_
 st.sidebar.caption(f"Arquivo em uso: **{data_path}**")
 
 df, qty_col = load_data(data_path)
+goals_df = load_goals()  # metas opcionais
 
+# ---------------- Filtros globais ----------------
 st.sidebar.title("Filtros")
 if "Data / Mês" in df.columns:
     min_date = pd.to_datetime(df["Data / Mês"]).min()
@@ -311,13 +351,164 @@ def calc_kpis(_df):
 
 fat, n_ped, n_cli, n_sku, ticket, lucro, margem_w, pct_rentavel = calc_kpis(flt)
 
+# ---------------- Tabs ----------------
 tabs = st.tabs([
-    "Visão Executiva","Clientes – RFM","Rentabilidade","Clientes","Produtos",
-    "Representantes","Geografia","Operacional","Pareto/ABC","SEBASTIAN",
-    "Simulador de Vendas","Exportar"
+    "Diretoria – Metas & Forecast",
+    "Visão Executiva",
+    "Clientes – RFM",
+    "Rentabilidade",
+    "Clientes",
+    "Produtos",
+    "Representantes",
+    "Geografia",
+    "Operacional",
+    "Pareto/ABC",
+    "SEBASTIAN",
+    "Simulador de Vendas",
+    "Exportar"
 ])
-(tab_exec, tab_rfm, tab_profit, tab_cli, tab_sku,
+(tab_dir, tab_exec, tab_rfm, tab_profit, tab_cli, tab_sku,
  tab_rep, tab_geo, tab_ops, tab_pareto, tab_seb, tab_sim, tab_export) = tabs
+
+# ---------------- Diretoria – Metas & Forecast ----------------
+with tab_dir:
+    st.subheader("Diretoria – Metas & Forecast (mensal)")
+
+    if goals_df is None:
+        st.info(
+            "Arquivo **Metas_Brasforma.xlsx** não encontrado ou em formato inesperado. "
+            "Esperado: aba 'Metas' com colunas Ano, Mes, Representante, Meta_Faturamento."
+        )
+    else:
+        # Coluna de data para forecast
+        if "Data do Pedido" in df.columns and df["Data do Pedido"].notna().any():
+            date_col_fore = "Data do Pedido"
+        elif "Data / Mês" in df.columns:
+            date_col_fore = "Data / Mês"
+        else:
+            date_col_fore = None
+
+        if date_col_fore is None:
+            st.warning("Não foi encontrada coluna de data para cálculo de forecast.")
+        else:
+            if d_fim is not None:
+                ref_date = pd.to_datetime(d_fim)
+            else:
+                ref_date = pd.to_datetime(df[date_col_fore].dropna().max())
+            ano_ref = ref_date.year
+            mes_ref = ref_date.month
+
+            st.caption(f"Mês de referência para metas e forecast: **{mes_ref:02d}/{ano_ref}**")
+
+            metas_ref = goals_df[(goals_df["Ano"] == ano_ref) & (goals_df["Mes"] == mes_ref)].copy()
+            if metas_ref.empty:
+                st.info(
+                    f"Não encontrei metas para {mes_ref:02d}/{ano_ref} em Metas_Brasforma.xlsx. "
+                    "Cadastre metas para liberar essa visão."
+                )
+            else:
+                # Fatos do mês até a data de referência (full base, ignorando filtros de rep/UF)
+                df_month = df[df[date_col_fore].dt.to_period("M") == pd.Period(ref_date, "M")].copy()
+                df_month = df_month[df_month[date_col_fore] <= ref_date]
+
+                if "Valor Pedido R$" not in df_month.columns:
+                    st.warning("Coluna 'Valor Pedido R$' é obrigatória para cálculo de realizado e forecast.")
+                else:
+                    dias_mes = pd.Period(ref_date, "M").days_in_month
+                    dias_passados = ref_date.day
+
+                    fat_real_total = df_month["Valor Pedido R$"].sum()
+                    fat_fore_total = fat_real_total / dias_passados * dias_mes if dias_passados > 0 else np.nan
+                    meta_total = metas_ref["Meta_Faturamento"].sum()
+                    gap_total = meta_total - fat_fore_total
+                    ating_atual = 100 * fat_real_total / meta_total if meta_total > 0 else np.nan
+                    ating_fore = 100 * fat_fore_total / meta_total if meta_total > 0 else np.nan
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Meta do mês (total)", fmt_money(meta_total))
+                    c2.metric(f"Realizado até {ref_date.strftime('%d/%m')}", fmt_money(fat_real_total))
+                    c3.metric("Forecast do mês", fmt_money(fat_fore_total))
+                    if pd.notna(ating_fore):
+                        delta_pp = ating_fore - 100
+                        c4.metric("Atingimento projetado", fmt_pct_safe(ating_fore),
+                                  delta=f"{delta_pp:.1f} p.p.".replace(".", ","))
+                    else:
+                        c4.metric("Atingimento projetado", "-")
+
+                    # Painel por representante
+                    if "Representante" in df_month.columns:
+                        real_rep = df_month.groupby("Representante", as_index=False)["Valor Pedido R$"].sum() \
+                                           .rename(columns={"Valor Pedido R$": "Realizado"})
+                    else:
+                        real_rep = pd.DataFrame(columns=["Representante", "Realizado"])
+                    real_rep["Realizado"] = pd.to_numeric(real_rep["Realizado"], errors="coerce").fillna(0.0)
+                    real_rep["Forecast"] = real_rep["Realizado"] / dias_passados * dias_mes if dias_passados > 0 else np.nan
+
+                    metas_ref_rep = metas_ref.groupby("Representante", as_index=False)["Meta_Faturamento"].sum()
+                    metas_ref_rep["Representante"] = metas_ref_rep["Representante"].astype(str).str.strip()
+
+                    painel_rep = metas_ref_rep.merge(real_rep, on="Representante", how="left")
+                    painel_rep["Realizado"] = painel_rep["Realizado"].fillna(0.0)
+                    painel_rep["Forecast"] = painel_rep["Forecast"].fillna(painel_rep["Realizado"])
+
+                    painel_rep["Atingimento Atual (%)"] = np.where(
+                        painel_rep["Meta_Faturamento"] > 0,
+                        100 * painel_rep["Realizado"] / painel_rep["Meta_Faturamento"],
+                        np.nan
+                    )
+                    painel_rep["Atingimento Forecast (%)"] = np.where(
+                        painel_rep["Meta_Faturamento"] > 0,
+                        100 * painel_rep["Forecast"] / painel_rep["Meta_Faturamento"],
+                        np.nan
+                    )
+                    painel_rep["GAP (R$)"] = painel_rep["Meta_Faturamento"] - painel_rep["Forecast"]
+
+                    st.markdown("#### Metas por representante – mês de referência")
+                    display_table(
+                        painel_rep.sort_values("Meta_Faturamento", ascending=False),
+                        money_cols=["Meta_Faturamento", "Realizado", "Forecast", "GAP (R$)"],
+                        pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"]
+                    )
+
+                    # Gráfico meta x realizado x forecast
+                    try:
+                        chart_df = painel_rep.copy()
+                        chart_long = chart_df.melt(
+                            id_vars=["Representante"],
+                            value_vars=["Meta_Faturamento", "Forecast", "Realizado"],
+                            var_name="Tipo",
+                            value_name="Valor"
+                        )
+                        st.altair_chart(
+                            alt.Chart(chart_long).mark_bar().encode(
+                                x=alt.X("Valor:Q", title="R$"),
+                                y=alt.Y("Representante:N", sort="-x"),
+                                color=alt.Color("Tipo:N", title=None),
+                                tooltip=["Representante", "Tipo", alt.Tooltip("Valor:Q", format=",.0f")]
+                            ).properties(height=420),
+                            use_container_width=True
+                        )
+                    except Exception:
+                        pass
+
+                    # Necessidade diária por representante
+                    dias_restantes = dias_mes - dias_passados
+                    if dias_restantes > 0:
+                        painel_rep2 = painel_rep.copy()
+                        painel_rep2["Necessidade por dia útil (R$)"] = np.where(
+                            painel_rep2["Meta_Faturamento"] > painel_rep2["Forecast"],
+                            (painel_rep2["Meta_Faturamento"] - painel_rep2["Forecast"]) / dias_restantes,
+                            0.0
+                        )
+                        with st.expander("Necessidade de venda diária por representante para atingir meta do mês"):
+                            display_table(
+                                painel_rep2.sort_values("Necessidade por dia útil (R$)", ascending=False),
+                                money_cols=["Necessidade por dia útil (R$)", "GAP (R$)",
+                                            "Meta_Faturamento", "Forecast", "Realizado"],
+                                pct_cols=["Atingimento Atual (%)", "Atingimento Forecast (%)"]
+                            )
+                    else:
+                        st.caption("Mês encerrado – sem dias restantes para cálculo de necessidade diária.")
 
 # ---------------- Visão Executiva ----------------
 with tab_exec:
@@ -597,7 +788,7 @@ with tab_pareto:
             s["Classe"] = s["%Acum"].apply(lambda p: "A" if p<=80 else ("B" if p<=95 else "C"))
             display_table(s.head(300), money_cols=["Valor Pedido R$"], pct_cols=["%Acum"])
 
-# ---------------- SEBASTIAN – cockpit do representante (refinado) ----------------
+# ---------------- SEBASTIAN – cockpit do representante (com meta) ----------------
 with tab_seb:
     st.subheader("SEBASTIAN – Desempenho Individual do Representante")
 
@@ -682,6 +873,61 @@ with tab_seb:
                     clientes_novos = []
                     clientes_perdidos = []
 
+                # ---- Meta & Forecast do representante (mês do d_fim_ts) ----
+                meta_rep = None
+                fat_real_rep_mes = 0.0
+                forecast_rep_mes = np.nan
+                ating_fore_rep = np.nan
+                dias_restantes_rep = 0
+                necessidade_dia_rep = np.nan
+
+                if goals_df is not None and date_col is not None:
+                    ano_ref = d_fim_ts.year
+                    mes_ref = d_fim_ts.month
+                    metas_ref_rep = goals_df[
+                        (goals_df["Ano"] == ano_ref) &
+                        (goals_df["Mes"] == mes_ref) &
+                        (goals_df["Representante"].astype(str).str.strip() == str(rep_sel).strip())
+                    ]
+                    if not metas_ref_rep.empty:
+                        meta_rep = metas_ref_rep["Meta_Faturamento"].sum()
+                        dias_mes_rep = pd.Period(d_fim_ts, "M").days_in_month
+                        dias_passados_rep = d_fim_ts.day
+                        first_day_rep = pd.Timestamp(d_fim_ts.year, d_fim_ts.month, 1)
+                        df_rep_month = df_rep_all[
+                            (df_rep_all[date_col] >= first_day_rep) &
+                            (df_rep_all[date_col] <= d_fim_ts)
+                        ]
+                        if "Valor Pedido R$" in df_rep_month.columns:
+                            fat_real_rep_mes = df_rep_month["Valor Pedido R$"].sum()
+                        forecast_rep_mes = fat_real_rep_mes / dias_passados_rep * dias_mes_rep if dias_passados_rep > 0 else np.nan
+                        ating_fore_rep = 100 * forecast_rep_mes / meta_rep if meta_rep > 0 else np.nan
+                        dias_restantes_rep = dias_mes_rep - dias_passados_rep
+                        if dias_restantes_rep > 0 and meta_rep > forecast_rep_mes:
+                            necessidade_dia_rep = (meta_rep - forecast_rep_mes) / dias_restantes_rep
+                        else:
+                            necessidade_dia_rep = 0.0
+
+                if meta_rep is not None:
+                    st.markdown("### Meta & Forecast do representante (mês corrente)")
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Meta do mês (R$)", fmt_money(meta_rep))
+                    m2.metric(f"Realizado no mês (até {d_fim_ts.strftime('%d/%m')})", fmt_money(fat_real_rep_mes))
+                    if pd.notna(ating_fore_rep):
+                        delta_pp_rep = ating_fore_rep - 100
+                        m3.metric("Atingimento projetado", fmt_pct_safe(ating_fore_rep),
+                                  delta=f"{delta_pp_rep:.1f} p.p.".replace(".", ","))
+                    else:
+                        m3.metric("Atingimento projetado", "-")
+                    if dias_restantes_rep > 0:
+                        m4.metric("Necessidade por dia útil", fmt_money(necessidade_dia_rep))
+                    else:
+                        m4.metric("Necessidade por dia útil", "-")
+                else:
+                    st.caption("Sem meta cadastrada para este representante no mês de referência em Metas_Brasforma.xlsx.")
+
+                st.markdown("---")
+
                 # KPIs básicos (1a–1h)
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("1a) Faturamento no período (faturado)", fmt_money(val_faturado))
@@ -724,7 +970,6 @@ with tab_seb:
                 if "Ano-Mes" not in df_rep_12m.columns:
                     df_rep_12m["Ano-Mes"] = df_rep_12m[date_col].dt.to_period("M").astype(str)
 
-                # Indicadores avançados da carteira
                 if "Nome Cliente" in df_rep_12m.columns:
                     n_cli_12m = df_rep_12m["Nome Cliente"].nunique()
                 else:
@@ -876,7 +1121,7 @@ with tab_seb:
                 else:
                     st.caption("Nenhum pedido em aberto para esse representante no período selecionado (considerando a heurística de status).")
 
-# ---------------- Simulador de Vendas – (mantido) ----------------
+# ---------------- Simulador de Vendas – (com modo GAP-meta) ----------------
 with tab_sim:
     st.subheader("Simulador de Vendas – multi-SKU com preço manual, elasticidade, impostos, despesas variáveis, alvo de MC e export (CSV/PDF)")
 
@@ -1088,11 +1333,60 @@ with tab_sim:
                 c5, c6 = st.columns(2)
                 if pd.notna(margem_contrib_pct):
                     delta_pp = margem_contrib_pct - margem_target_pct
-                    delta_txt = f"{delta_pp:.1f} p.p.".replace(".", ",")
-                    c5.metric("MC atual do cenário", fmt_pct_safe(margem_contrib_pct, 1), delta=delta_txt)
+                    c5.metric("MC atual do cenário", fmt_pct_safe(margem_contrib_pct, 1),
+                              delta=f"{delta_pp:.1f} p.p.".replace(".", ","))
                 else:
                     c5.metric("MC atual do cenário", "-")
                 c6.metric("MC mínima desejada", fmt_pct_safe(margem_target_pct, 1))
+
+                # ---- Modo "Fechar GAP da meta" ----
+                if goals_df is not None and d_fim is not None:
+                    with st.expander("Conectar simulação com a meta mensal (modo 'Fechar GAP')"):
+                        usar_meta = st.checkbox("Usar meta mensal para avaliar esta simulação", value=False)
+                        if usar_meta:
+                            ref_date = pd.to_datetime(d_fim)
+                            ano_ref = ref_date.year
+                            mes_ref = ref_date.month
+                            metas_ref = goals_df[(goals_df["Ano"] == ano_ref) & (goals_df["Mes"] == mes_ref)].copy()
+                            if metas_ref.empty:
+                                st.warning("Não encontrei metas para o mês de referência em Metas_Brasforma.xlsx.")
+                            else:
+                                # Se filtro de representante estiver ativo, aplicamos sobre metas e base
+                                metas_filtradas = metas_ref.copy()
+                                if rep:
+                                    metas_filtradas = metas_filtradas[metas_filtradas["Representante"].isin(rep)]
+                                meta_val = metas_filtradas["Meta_Faturamento"].sum()
+
+                                if "Data do Pedido" in df.columns and df["Data do Pedido"].notna().any():
+                                    date_col_sim = "Data do Pedido"
+                                else:
+                                    date_col_sim = "Data / Mês"
+
+                                first_day = pd.Timestamp(ref_date.year, ref_date.month, 1)
+                                df_mes_filtrado = df[
+                                    (df[date_col_sim] >= first_day) &
+                                    (df[date_col_sim] <= ref_date)
+                                ].copy()
+                                if rep and "Representante" in df_mes_filtrado.columns:
+                                    df_mes_filtrado = df_mes_filtrado[df_mes_filtrado["Representante"].isin(rep)]
+
+                                realizado_antes_sim = df_mes_filtrado["Valor Pedido R$"].sum() if "Valor Pedido R$" in df_mes_filtrado.columns else 0.0
+                                gap_atual = meta_val - realizado_antes_sim
+                                gap_atual_pos = max(gap_atual, 0.0)
+
+                                contrib_sim = min(faturamento_sim, gap_atual_pos) if meta_val > 0 else 0.0
+                                if gap_atual_pos > 0:
+                                    pct_gap_coberto = 100 * contrib_sim / gap_atual_pos
+                                else:
+                                    pct_gap_coberto = 100.0 if meta_val > 0 and gap_atual <= 0 else np.nan
+
+                                c_gap1, c_gap2, c_gap3 = st.columns(3)
+                                c_gap1.metric("Meta do mês (R$)", fmt_money(meta_val))
+                                c_gap2.metric("GAP atual antes da simulação", fmt_money(gap_atual_pos))
+                                if pd.notna(pct_gap_coberto):
+                                    c_gap3.metric("% do GAP coberto por esta simulação", fmt_pct_safe(pct_gap_coberto))
+                                else:
+                                    c_gap3.metric("% do GAP coberto por esta simulação", "-")
 
                 st.markdown("### Mini DRE – Venda simulada (todos os SKUs, até Margem de Contribuição)")
                 dre = pd.DataFrame({
