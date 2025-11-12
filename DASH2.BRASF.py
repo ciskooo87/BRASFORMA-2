@@ -530,15 +530,50 @@ with tabs[8]:
         st.dataframe(tb, use_container_width=True)
         st.altair_chart(alt.Chart(tb).mark_bar().encode(x="Qtd:Q", y=alt.Y("Atrasado / No prazo:N", sort="-x")), use_container_width=True)
 
-# -------- 9) Pareto/ABC
+# -------- 9) Pareto/ABC  (PATCH v25.2)
 with tabs[9]:
     st.subheader("Pareto/ABC")
-    tb = (flt.groupby("Nome Cliente", dropna=False)["Valor Pedido R$"].sum()
-          .reset_index().sort_values("Valor Pedido R$", ascending=False))
-    tb["%Acum"] = tb["Valor Pedido R$"].cumsum()/tb["Valor Pedido R$"].sum()*100
-    tb["Classe"] = np.where(tb["%Acum"]<=80,"A", np.where(tb["%Acum"]<=95,"B","C"))
-    st.dataframe(tb, use_container_width=True)
-    st.altair_chart(alt.Chart(tb).mark_line(point=True).encode(x=alt.X("row_number()"), y="%Acum:Q"), use_container_width=True)
+
+    if "Valor Pedido R$" not in flt.columns or "Nome Cliente" not in flt.columns or flt.empty:
+        st.info("Base insuficiente para calcular Pareto.")
+    else:
+        tb = (
+            flt.groupby("Nome Cliente", dropna=False)["Valor Pedido R$"]
+               .sum()
+               .reset_index()
+               .sort_values("Valor Pedido R$", ascending=False)
+               .rename(columns={"Valor Pedido R$": "Faturamento"})
+        )
+
+        total = tb["Faturamento"].sum()
+        if total == 0:
+            st.info("Sem faturamento no período selecionado.")
+        else:
+            tb = tb.reset_index(drop=True)
+            tb["%Acum"] = tb["Faturamento"].cumsum() / total * 100.0
+            tb["Classe"] = np.where(tb["%Acum"] <= 80, "A",
+                             np.where(tb["%Acum"] <= 95, "B", "C"))
+            tb["Rank"] = tb.index + 1  # <-- substitui row_number()
+
+            st.dataframe(tb, use_container_width=True)
+
+            chart = (
+                alt.Chart(tb)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("Rank:Q", title="Clientes (rank)"),
+                    y=alt.Y("%Acum:Q", title="% acumulado"),
+                    tooltip=[
+                        alt.Tooltip("Rank:Q", title="Rank"),
+                        alt.Tooltip("Nome Cliente:N", title="Cliente"),
+                        alt.Tooltip("Faturamento:Q", title="Faturamento", format=",.2f"),
+                        alt.Tooltip("%Acum:Q", title="% Acum.", format=",.1f"),
+                    ],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(chart, use_container_width=True)
+
 
 # -------- 10) SEBASTIAN
 with tabs[10]:
