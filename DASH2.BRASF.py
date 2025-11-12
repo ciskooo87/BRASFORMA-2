@@ -276,16 +276,59 @@ def money(x):
 def kpi_block(col, label, value, help_txt=None):
     if help_txt: col.metric(label, money(value), help=help_txt)
     else: col.metric(label, money(value))
+def series_12m(flt_df: pd.DataFrame, value_col: str):
+    """
+    Série mensal robusta para Altair.
+    - Normaliza datetime e numérico
+    - Remove NaT/NaN
+    - Renomeia colunas para nomes simples (Data, Valor)
+    - Retorna um placeholder se não houver dados suficientes
+    """
+    # pré-validações
+    if flt_df is None or not isinstance(flt_df, pd.DataFrame):
+        return alt.Chart(pd.DataFrame({"Data": [], "Valor": []})).mark_line()
 
-def series_12m(flt_df, value_col):
-    if "Data / Mês" not in flt_df.columns: return alt.Chart(pd.DataFrame())
-    ser = (flt_df.dropna(subset=["Data / Mês"]).groupby(pd.Grouper(key="Data / Mês", freq="MS"))[value_col].sum().reset_index())
-    ser = ser.sort_values("Data / Mês").tail(12)
-    return alt.Chart(ser).mark_line(point=True).encode(
-        x=alt.X("yearmonth(Data / Mês):T", title="Mês"),
-        y=alt.Y(f"{value_col}:Q", title="R$"),
-        tooltip=[alt.Tooltip("yearmonth(Data / Mês):T","Mês"), alt.Tooltip(f"{value_col}:Q","Valor", format=",.2f")]
-    ).properties(height=220)
+    if "Data / Mês" not in flt_df.columns or value_col not in flt_df.columns:
+        return alt.Chart(pd.DataFrame({"Data": [], "Valor": []})).mark_line()
+
+    # normalizações
+    ser = flt_df[["Data / Mês", value_col]].copy()
+    ser["Data / Mês"] = pd.to_datetime(ser["Data / Mês"], errors="coerce")
+    ser[value_col] = pd.to_numeric(ser[value_col], errors="coerce")
+
+    # drop lixo
+    ser = ser.dropna(subset=["Data / Mês"])
+    if ser.empty:
+        return alt.Chart(pd.DataFrame({"Data": [], "Valor": []})).mark_line()
+
+    # resample mensal (MS = month start)
+    ser = (ser.groupby(pd.Grouper(key="Data / Mês", freq="MS"))[value_col]
+              .sum()
+              .reset_index()
+              .rename(columns={"Data / Mês": "Data", value_col: "Valor"}))
+
+    # últimos 12
+    ser = ser.sort_values("Data").tail(12)
+
+    if ser["Valor"].isna().all() or ser.empty:
+        return alt.Chart(pd.DataFrame({"Data": [], "Valor": []})).mark_line()
+
+    # chart robusto
+    chart = (
+        alt.Chart(ser)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("yearmonth(Data):T", title="Mês"),
+            y=alt.Y("Valor:Q", title="R$"),
+            tooltip=[
+                alt.Tooltip("yearmonth(Data):T", title="Mês"),
+                alt.Tooltip("Valor:Q", title="Valor", format=",.2f"),
+            ],
+        )
+        .properties(height=220)
+    )
+    return chart
+
 
 # ==========================
 # ABAS
